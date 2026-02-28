@@ -1,0 +1,80 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DIRECT_URL")
+}
+
+model Teacher {
+  id         Int    @id @default(autoincrement())
+  teacher_id String @unique
+  name       String
+  email      String @unique
+  phone      String @unique
+  role       String @default("teacher")
+  password   String
+  exams      Exam[]
+}
+
+model Student {
+  id         Int    @id @default(autoincrement())
+  student_id String @unique
+  name       String
+  email      String @unique
+  photoupload  String
+ 
+
+}
+
+model Exam {
+  id               Int      @id @default(autoincrement())
+  title            String
+  description      String?
+  durationMinutes  Int
+  examKey          String   @unique
+  startTime        DateTime
+  endTime          DateTime
+
+  createdBy        Int
+  teacher          Teacher  @relation(fields: [createdBy], references: [id])
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  questions Question[]
+  
+
+}
+
+model Question {
+  id             Int    @id @default(autoincrement())
+  examId         Int
+  questionText   String
+  optionA        String
+  optionB        String
+  optionC        String
+  optionD        String
+  correctAnswer  String
+
+  exam           Exam   @relation(fields: [examId], references: [id])
+}
+
+
+model Violation {
+  id          Int      @id @default(autoincrement())
+  examId      Int
+  studentId   String
+  type        String   
+  severity    String   
+  description String?
+  audioPath   String?
+  videoPath   String? 
+  timestamp   DateTime @default(now())
+}

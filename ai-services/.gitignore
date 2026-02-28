@@ -1,0 +1,22 @@
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Large model files
+shape_predictor_68_face_landmarks.dat
+gaze_lib/trained_models/shape_predictor_68_face_landmarks.dat
+
+# Violation videos
+gaze_violations/
+head_violations/
+audio_violations/
+
+# Weights (too large)
+*.pth
+
+# Environment
+.env

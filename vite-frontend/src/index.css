@@ -1,0 +1,22 @@
+@import "tailwindcss";
+
+.nav-link {
+  @apply text-gray-700 font-medium transition-colors duration-200;
+}
+
+.nav-link[aria-current="page"] {
+  @apply text-green-600 font-semibold border-b-2 border-green-600;
+}
+
+@keyframes scrollmarquee {
+  to {
+    transform: translateX(calc(-100% - 2rem));
+  }
+}
+
+.animate-scroll {
+  animation: scrollmarquee 10s linear infinite;
+}
+.marquee-container:hover .animate-scroll {
+  animation-play-state: paused;
+}

@@ -15,8 +15,7 @@ gaze_violations/
 head_violations/
 audio_violations/
 
-# Weights (too large)
-*.pth
+
 
 # Environment
 .env

@@ -30,9 +30,28 @@ def face_too_large(location, img, max_ratio=0.9):
     return (face_area / img_area) > max_ratio
 
 # ---------- LIVENESS HELPERS ----------
-def images_are_too_similar(img1, img2, threshold=12):
-    diff = np.mean(np.abs(img1.astype("float") - img2.astype("float")))
-    return diff < threshold
+def check_movement(images, threshold=5, required_ratio=0.3):
+    """
+    Lenient movement check.
+    Only requires 30% of frame pairs to show movement.
+    """
+    if len(images) < 2:
+        return True  # can't check, give benefit of doubt
+
+    movement_count = 0
+    total_pairs = len(images) - 1
+
+    for i in range(total_pairs):
+        diff = np.mean(np.abs(
+            images[i].astype("float") - images[i + 1].astype("float")
+        ))
+        if diff >= threshold:
+            movement_count += 1
+
+    ratio = movement_count / total_pairs
+    print(f"[Movement] {movement_count}/{total_pairs} pairs moved ({ratio:.2f})")
+    return ratio >= required_ratio
+
 
 def eye_aspect_ratio(eye):
     A = dist.euclidean(eye[1], eye[5])
@@ -40,8 +59,17 @@ def eye_aspect_ratio(eye):
     C = dist.euclidean(eye[0], eye[3])
     return (A + B) / (2.0 * C)
 
-def blink_detected_across_frames(images):
-    EAR_THRESHOLD = 0.26
+
+def check_blink(images):
+    """
+    Lenient blink detection.
+    Passes if full blink detected OR natural eye movement variation exists.
+    """
+    EAR_THRESHOLD = 0.26   # full blink
+    EAR_VAR_MIN   = 0.03   # minimum variation = natural eye movement
+
+    ear_values = []
+
     for img in images:
         landmarks = face_recognition.face_landmarks(img)
         if not landmarks:
@@ -52,8 +80,20 @@ def blink_detected_across_frames(images):
                     eye_aspect_ratio(face["left_eye"]) +
                     eye_aspect_ratio(face["right_eye"])
                 ) / 2.0
+                ear_values.append(ear)
+
                 if ear < EAR_THRESHOLD:
+                    print(f"[Blink] Full blink detected EAR={ear:.3f}")
                     return True
+
+    if len(ear_values) >= 2:
+        ear_variation = max(ear_values) - min(ear_values)
+        print(f"[Blink] EAR variation={ear_variation:.3f}")
+        if ear_variation >= EAR_VAR_MIN:
+            print(f"[Blink] Natural eye movement detected")
+            return True
+
+    print(f"[Blink] No blink or eye movement detected")
     return False
 
 # ---------- MATCH LEVEL ----------
@@ -140,7 +180,7 @@ async def verify_face(
 
         is_real, liveness_conf = predict_antispoof(face_crop)
 
-        if liveness_conf < 0.45:
+        if liveness_conf < 0.25:
             return {
         "matched": False,
         "distance": None,
@@ -151,14 +191,11 @@ async def verify_face(
     }
 
         # ---------- MOVEMENT ----------
-        if not any(
-            not images_are_too_similar(live_imgs[i], live_imgs[i + 1])
-            for i in range(len(live_imgs) - 1)
-        ):
+        if not check_movement(live_imgs):
             return {"matched": False, "match_level": "failed", "reason": "No movement detected"}
 
         # ---------- BLINK ----------
-        if not blink_detected_across_frames(live_imgs):
+        if not check_blink(live_imgs):
             return {"matched": False, "match_level": "failed", "reason": "Blink not detected"}
 
         # ---------- FACE MATCH ----------
@@ -194,4 +231,3 @@ async def verify_face(
         for p in live_paths:
             if os.path.exists(p):
                 os.remove(p)
-

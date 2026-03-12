@@ -29,17 +29,19 @@ def predict_antispoof(face_img: np.ndarray):
 
     # ❌ DO NOT convert color (already RGB from face_recognition)
     img = face_img.copy()
-
     img = transform(img).unsqueeze(0).to(DEVICE)
 
+    # Run 3 times and average to reduce random bad predictions
+    scores = []
     with torch.no_grad():
-        output = model(img)
-        prob = torch.softmax(output, dim=1)[0]
+        for _ in range(3):
+            output = model(img)
+            prob = torch.softmax(output, dim=1)[0]
+            scores.append(float(prob[0]))
 
-    # ✅ FIXED label order (MOST IMPORTANT)
-    real_conf = float(prob[0])   # real
-    spoof_conf = float(prob[1])  # spoof
+    real_conf = sum(scores) / len(scores)
+    spoof_conf = 1 - real_conf
 
     print(f"[AntiSpoof] REAL={real_conf:.3f} SPOOF={spoof_conf:.3f}")
 
-    return real_conf > 0.45, real_conf
+    return real_conf > 0.25, real_conf

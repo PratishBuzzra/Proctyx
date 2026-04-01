@@ -117,6 +117,9 @@ const TeacherDashboard = () => {
                   <Link to={`/exam/${exam.id}/questions`} className="text-blue-600">
                     Manage Questions
                   </Link>
+                  <Link to={`/exam/${exam.id}/report`} className="text-purple-600">
+                    View Report
+                  </Link>
                   <button onClick={() => openEditModal(exam)} className="text-green-600">
                     Edit
                   </button>

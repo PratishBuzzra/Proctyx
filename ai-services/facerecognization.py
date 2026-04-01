@@ -180,7 +180,7 @@ async def verify_face(
 
         is_real, liveness_conf = predict_antispoof(face_crop)
 
-        if liveness_conf < 0.25:
+        if liveness_conf < 0.20:
             return {
         "matched": False,
         "distance": None,

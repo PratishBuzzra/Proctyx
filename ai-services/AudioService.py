@@ -3,6 +3,7 @@ import os
 import uuid
 import wave
 from fastapi import FastAPI, Request
+from fastapi.staticfiles import StaticFiles
 from datetime import datetime
 from fastapi.middleware.cors import CORSMiddleware
 from scipy.signal import butter, filtfilt
@@ -25,8 +26,10 @@ SUSTAINED_RATIO  = 0.5
 VOICE_LOW_HZ  = 85    # lowest human voice frequency
 VOICE_HIGH_HZ = 3000  # highest human voice frequency
 
-AUDIO_VIOLATIONS_DIR = "audio_violations"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+AUDIO_VIOLATIONS_DIR = os.path.join(BASE_DIR, "audio_violations")
 os.makedirs(AUDIO_VIOLATIONS_DIR, exist_ok=True)
+app.mount("/audios", StaticFiles(directory=AUDIO_VIOLATIONS_DIR), name="audio-violation-files")
 
 # ---------- HELPER FUNCTIONS ----------
 
@@ -153,16 +156,17 @@ async def analyze_audio(request: Request):
 
             # Save WAV file
             filename         = f"{uuid.uuid4()}.wav"
-            audio_path       = os.path.join(AUDIO_VIOLATIONS_DIR, filename)
+            save_path        = os.path.join(AUDIO_VIOLATIONS_DIR, filename)
+            audio_path       = filename
             samples_int16    = (filtered_samples * 32767).astype(np.int16)
 
-            with wave.open(audio_path, 'w') as wav_file:
+            with wave.open(save_path, 'w') as wav_file:
                 wav_file.setnchannels(1)
                 wav_file.setsampwidth(2)
                 wav_file.setframerate(SAMPLE_RATE)
                 wav_file.writeframes(samples_int16.tobytes())
 
-            print(f"Violation audio saved: {audio_path}")
+            print(f"Violation audio saved: {save_path}")
 
         print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         print(f"Voice ratio    : {voice_ratio:.3f}")

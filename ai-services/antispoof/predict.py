@@ -44,4 +44,4 @@ def predict_antispoof(face_img: np.ndarray):
 
     print(f"[AntiSpoof] REAL={real_conf:.3f} SPOOF={spoof_conf:.3f}")
 
-    return real_conf > 0.25, real_conf
+    return real_conf > 0.20, real_conf

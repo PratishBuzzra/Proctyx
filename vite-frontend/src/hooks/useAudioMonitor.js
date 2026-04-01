@@ -4,6 +4,13 @@ const CHUNK_INTERVAL_MS = 5000;
 const FASTAPI_URL = "http://localhost:8002";
 const NODE_URL = "http://localhost:3000/api/v1";
 
+const normalizeAudioPath = (audioPath) => {
+  if (!audioPath || typeof audioPath !== "string") return null;
+  const normalized = audioPath.replace(/\\/g, "/").trim();
+  if (!normalized.toLowerCase().endsWith(".wav")) return null;
+  return normalized.split("/").pop() || null;
+};
+
 const useAudioMonitor = (active, examId, studentId) => {
   const streamRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -56,7 +63,7 @@ const useAudioMonitor = (active, examId, studentId) => {
                   type: aiResult.type,
                   severity: aiResult.severity,
                   description: aiResult.description,
-                   audioPath: aiResult.audio_path,
+                  audioPath: normalizeAudioPath(aiResult.audio_path),
                 }),
               });
               console.warn("Audio violation stored:", aiResult.type);

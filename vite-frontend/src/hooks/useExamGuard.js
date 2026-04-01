@@ -1,16 +1,37 @@
 import { useEffect, useRef } from "react";
 import { toast } from "react-toastify";
 
-const useExamGuard = () => {
+const base_url = import.meta.env.VITE_API_URL;
+
+const useExamGuard = (examId, studentId) => {
   const lastToastRef = useRef(0);
   const violationCountRef = useRef(0);
   const leaveRef = useRef(false);
 
   useEffect(() => {
-    const logViolation = (type) => {
+    const saveViolation = async (type, severity = "medium", description = "") => {
+      if (!examId || !studentId) return;
+      try {
+        await fetch(`${base_url}/violations/store`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            examId,
+            studentId,
+            type,
+            severity,
+            description,
+          }),
+        });
+      } catch (err) {
+        console.error("Failed to save violation:", err);
+      }
+    };
+
+    const logViolation = (type, severity = "medium", description = "") => {
       const now = Date.now();
 
-     
       if (now - lastToastRef.current < 2000) return;
 
       lastToastRef.current = now;
@@ -20,13 +41,14 @@ const useExamGuard = () => {
 
       console.log("Violation:", type);
       console.log("Total violations:", violationCountRef.current);
+
+      saveViolation(type, severity, description);
     };
 
-   
     const handleLeaveExam = () => {
       if (leaveRef.current) return;
       leaveRef.current = true;
-      logViolation("LEAVE_EXAM");
+      logViolation("LEAVE_EXAM", "high", "Student left the exam window");
     };
 
     const handleFocus = () => {
@@ -47,35 +69,31 @@ const useExamGuard = () => {
       handleLeaveExam();
     };
 
-   
     const handleFullscreenChange = () => {
       if (!document.fullscreenElement) {
-        logViolation("FULLSCREEN_EXIT");
+        logViolation("FULLSCREEN_EXIT", "high", "Student exited fullscreen mode");
       }
     };
 
- 
     const handleKeyDown = (e) => {
       const blocked =
         (e.ctrlKey &&
           ["c", "v", "x", "a", "t", "w", "s"].includes(
             e.key.toLowerCase()
           )) ||
-        ["F12"].includes(e.key); // ❌ ESC removed
+        ["F12"].includes(e.key);
 
       if (blocked) {
         e.preventDefault();
-        logViolation("KEYBOARD_SHORTCUT");
+        logViolation("KEYBOARD_SHORTCUT", "medium", `Blocked key: ${e.ctrlKey ? "Ctrl+" : ""}${e.key}`);
       }
     };
 
-   
     const handleContextMenu = (e) => {
       e.preventDefault();
-      logViolation("RIGHT_CLICK");
+      logViolation("RIGHT_CLICK", "low", "Student right clicked during exam");
     };
 
- 
     window.addEventListener("blur", handleBlur);
     window.addEventListener("focus", handleFocus);
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -93,7 +111,7 @@ const useExamGuard = () => {
       window.removeEventListener("contextmenu", handleContextMenu);
       window.removeEventListener("beforeunload", handleBeforeUnload);
     };
-  }, []);
+  }, [examId, studentId]);
 };
 
 export default useExamGuard;

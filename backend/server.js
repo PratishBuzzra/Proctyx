@@ -9,6 +9,7 @@ import examroute from "./routes/ExamRouter.js"
 import questionRoutes from "./routes/QuestionRouter.js"
 import cookieParser from 'cookie-parser';
 import violationRoutes from "./routes/ViolationRouter.js";
+import ResultRoutes from "./routes/ResultRouter.js"
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -31,6 +32,7 @@ app.use("/api/v1/studentexam", studentexamroute);
 app.use('/api/v1/exam', examroute)
 app.use("/api/v1/questions", questionRoutes);
 app.use("/api/v1/violations", violationRoutes);
+app.use("/api/v1/checkresult", ResultRoutes);
 app.get('/', (req, res) => {
   res.send('<h1>Welcome to services</h1>');
 });

@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from fastapi import FastAPI, File, UploadFile
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 from collections import deque
@@ -8,6 +9,7 @@ import os
 import uuid
 import asyncio
 import time
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 import mediapipe as mp
 
@@ -70,8 +72,10 @@ baseline_yaw        = 0.0
 baseline_pitch      = 0.0
 is_calibrated       = False
 
-HEAD_VIOLATIONS_DIR = "head_violations"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+HEAD_VIOLATIONS_DIR = os.path.join(BASE_DIR, "head_violations")
 os.makedirs(HEAD_VIOLATIONS_DIR, exist_ok=True)
+app.mount("/videos", StaticFiles(directory=HEAD_VIOLATIONS_DIR), name="head-violation-videos")
 
 # ---------- LANDMARKS ----------
 NOSE_TIP      = 1
@@ -151,21 +155,51 @@ def check_sustained_violation(direction):
     return count >= 3
 
 
-def save_violation_video(frames):
+def save_violation_video(frames, filename):
     if not frames:
         return None
+    temp_path = None
     try:
-        filename   = f"{uuid.uuid4()}.mp4"
         video_path = os.path.join(HEAD_VIOLATIONS_DIR, filename)
+        temp_path  = os.path.join(HEAD_VIOLATIONS_DIR, f"tmp_{filename}")
         h, w       = frames[0].shape[:2]
         fourcc     = cv2.VideoWriter_fourcc(*'mp4v')
-        out        = cv2.VideoWriter(video_path, fourcc, 1.0, (w, h))
+        out        = cv2.VideoWriter(temp_path, fourcc, 1.0, (w, h))
         for f in frames:
             out.write(f)
         out.release()
-        print(f"Violation video saved: {video_path}")
+
+        # Browser-friendly H.264 output for HTML5 <video> playback
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-y",
+            "-loglevel", "error",
+            "-i", temp_path,
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            video_path,
+        ]
+        transcode = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+        if transcode.returncode == 0 and os.path.exists(video_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+            print(f"Violation video saved: {video_path}")
+            return video_path
+
+        # Fallback: keep original file if transcode fails
+        if temp_path and os.path.exists(temp_path):
+            os.replace(temp_path, video_path)
+        print(f"FFmpeg transcode failed, saved fallback video: {video_path}")
         return video_path
     except Exception as e:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
         print(f"Video save error: {e}")
         return None
 
@@ -373,11 +407,13 @@ async def analyze_head_pose(frame: UploadFile = File(...)):
                         f"Student looked {current_direction} for {event_duration}s "
                         f"— occurrence #{violation_stats[vtype]['count']}"
                     )
-                    video_path = "head_violations/saving..."
+                    video_filename = f"{uuid.uuid4()}.mp4"
+                    video_path = video_filename
 
                     # Start collecting post-violation frames (5 more seconds)
                     pending_clips[vtype] = {
                         "frames":        list(frame_buffer),   # pre-violation frames
+                        "filename":      video_filename,
                         "collect_until": now + 5.0             # collect for 5 more seconds
                     }
 
@@ -391,9 +427,11 @@ async def analyze_head_pose(frame: UploadFile = File(...)):
 
         # Save completed clips (post-violation window expired)
         for vtype in completed_clips:
-            clip_frames = pending_clips.pop(vtype)["frames"]
+            clip_data = pending_clips.pop(vtype)
+            clip_frames = clip_data["frames"]
+            clip_filename = clip_data["filename"]
             loop = asyncio.get_event_loop()
-            loop.run_in_executor(executor, save_violation_video, clip_frames)
+            loop.run_in_executor(executor, save_violation_video, clip_frames, clip_filename)
 
         # ---------- STATS ----------
         stats_summary = {vt: {"count": data["count"]} for vt, data in violation_stats.items()}

@@ -21,6 +21,8 @@ import AddQuestions from "./pages/Teacher/AddQuestions";
 import TeacherProtected from "./routes/TeacherProtected";
 import JoinExam from "./pages/Exam/JoinExam";
 import ProtectedExamRoute from "./routes/ProtectedExamRoute";
+import Result from "./pages/Result";
+import ExamReport from "./pages/Teacher/ExamReport";
 
 const App = () => {
   return (
@@ -41,6 +43,7 @@ const App = () => {
         <Route path="/howitworks" element={<HowItWorks />} />
         <Route path="/login" element={<Login />} />
         <Route path="/join-exam" element={<JoinExam />} />
+        <Route path="/result/:examId/:studentId" element={<Result />} />
       
         <Route
           path="/studentverify/:examId"
@@ -109,6 +112,14 @@ const App = () => {
             </TeacherProtected>
           }
         />
+        <Route
+  path="/exam/:examId/report"
+  element={
+    <TeacherProtected>
+      <ExamReport />
+    </TeacherProtected>
+  }
+/>
       </Routes>
     </div>
   );

@@ -8,6 +8,13 @@ const NODE_URL            = "http://localhost:3000/api/v1";
 const CAPTURE_INTERVAL_MS = 1000;
 const CALIBRATION_COUNT   = 15;
 
+const normalizeVideoPath = (videoPath) => {
+  if (!videoPath || typeof videoPath !== "string") return null;
+  const normalized = videoPath.replace(/\\/g, "/").trim();
+  if (!normalized.toLowerCase().endsWith(".mp4")) return null;
+  return normalized.split("/").pop() || null;
+};
+
 const WebcamMonitor = ({ examId, studentId, active = true }) => {
   const videoRef    = useRef(null);
   const streamRef   = useRef(null);
@@ -108,7 +115,14 @@ const WebcamMonitor = ({ examId, studentId, active = true }) => {
         const res    = await fetch(`${FASTAPI_GAZE_URL}/analyze-gaze`, { method: "POST", body: formData });
         const result = await res.json();
         console.log(`Gaze: ${result.direction}`);
-        if (result.violation) await storeViolation({ type: result.type, severity: result.severity, description: result.description, videoPath: result.video_path });
+        if (result.violation) {
+          await storeViolation({
+            type: result.type === "FACE_NOT_VISIBLE" ? "GAZE_FACE_NOT_VISIBLE" : result.type,
+            severity: result.severity,
+            description: result.description,
+            videoPath: normalizeVideoPath(result.video_path),
+          });
+        }
       } catch (err) {
         console.error("Gaze error:", err);
       }
@@ -130,7 +144,14 @@ const WebcamMonitor = ({ examId, studentId, active = true }) => {
         }
 
         console.log(`Head: ${result.direction} | Adj Yaw: ${result.adj_yaw}° Pitch: ${result.adj_pitch}°`);
-        if (result.violation) await storeViolation({ type: result.type, severity: result.severity, description: result.description, videoPath: result.video_path });
+        if (result.violation) {
+          await storeViolation({
+            type: result.type === "FACE_NOT_VISIBLE" ? "HEAD_FACE_NOT_VISIBLE" : result.type,
+            severity: result.severity,
+            description: result.description,
+            videoPath: normalizeVideoPath(result.video_path),
+          });
+        }
       } catch (err) {
         console.error("Head pose error:", err);
       }

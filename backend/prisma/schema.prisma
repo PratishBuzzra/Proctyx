@@ -78,3 +78,13 @@ model Violation {
   videoPath   String? 
   timestamp   DateTime @default(now())
 }
+
+model ExamResult {
+  id           Int      @id @default(autoincrement())
+  examId       Int
+  studentId    String
+  score        Int
+  totalQuestions Int
+  percentage   Float
+  submittedAt  DateTime @default(now())
+}

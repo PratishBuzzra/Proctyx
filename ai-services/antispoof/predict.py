@@ -5,6 +5,7 @@ from torchvision import transforms
 from antispoof.model import AntiSpoofNet
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+REAL_THRESHOLD = 0.40
 
 MODEL_PATH = os.path.join(
     os.path.dirname(__file__), "..", "weights", "antispoof_weights.pth"
@@ -44,4 +45,4 @@ def predict_antispoof(face_img: np.ndarray):
 
     print(f"[AntiSpoof] REAL={real_conf:.3f} SPOOF={spoof_conf:.3f}")
 
-    return real_conf > 0.20, real_conf
+    return real_conf >= REAL_THRESHOLD, real_conf

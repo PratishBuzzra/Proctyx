@@ -32,16 +32,28 @@ face_mesh = mp_face_mesh.FaceMesh(
     min_tracking_confidence=0.5
 )
 
-YAW_THRESHOLD  = 20
-PITCH_DOWN     = 15
-PITCH_UP       = -15
+BASE_YAW_THRESHOLD  = 20.0
+BASE_PITCH_ABS      = 15.0
+
+# Runtime thresholds (updated after calibration)
+dynamic_yaw_threshold = BASE_YAW_THRESHOLD
+dynamic_pitch_down    = BASE_PITCH_ABS
+dynamic_pitch_up      = -BASE_PITCH_ABS
+
+# Stability controls
+POSE_SMOOTHING_ALPHA   = 0.35
+EVENT_MIN_SECONDS      = 3.0
+POST_VIOLATION_SECONDS = 5.0
+EVENT_COOLDOWN_SECONDS = 2.0
 
 pose_history  = deque(maxlen=5)
 frame_buffer  = deque(maxlen=10)   # keep 10s of pre-violation footage
 executor      = ThreadPoolExecutor(max_workers=2)
+smoothed_adj_yaw   = None
+smoothed_adj_pitch = None
 
 # Pending violation clips: tracks violations waiting for post-violation frames
-# {vtype: {"frames": [...pre+violation frames], "collect_until": timestamp}}
+# {clip_id: {"frames": [...pre+violation frames], "collect_until": timestamp, "filename": "...", "vtype": "..."}}
 pending_clips = {}
 
 # ---------- VIOLATION TRACKING ----------
@@ -49,11 +61,11 @@ pending_clips = {}
 # active_since = when the current look-away event started
 # event_fired  = True once violation fires for this event (prevents re-firing same event)
 violation_stats = {
-    "HEAD_LEFT":        {"count": 0, "active_since": None, "event_fired": False},
-    "HEAD_RIGHT":       {"count": 0, "active_since": None, "event_fired": False},
-    "HEAD_DOWN":        {"count": 0, "active_since": None, "event_fired": False},
-    "HEAD_UP":          {"count": 0, "active_since": None, "event_fired": False},
-    "FACE_NOT_VISIBLE": {"count": 0, "active_since": None, "event_fired": False},
+    "HEAD_LEFT":        {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+    "HEAD_RIGHT":       {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+    "HEAD_DOWN":        {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+    "HEAD_UP":          {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+    "FACE_NOT_VISIBLE": {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
 }
 DIRECTION_TO_TYPE = {
     "LEFT":    "HEAD_LEFT",
@@ -123,7 +135,25 @@ def get_head_angles(landmarks, img_w, img_h):
     return yaw, pitch, roll
 
 
-def determine_head_direction(yaw, pitch):
+def update_dynamic_thresholds(yaws, pitches):
+    global dynamic_yaw_threshold, dynamic_pitch_down, dynamic_pitch_up
+
+    if not yaws or not pitches:
+        dynamic_yaw_threshold = BASE_YAW_THRESHOLD
+        dynamic_pitch_down = BASE_PITCH_ABS
+        dynamic_pitch_up = -BASE_PITCH_ABS
+        return
+
+    yaw_std = float(np.std(yaws))
+    pitch_std = float(np.std(pitches))
+
+    dynamic_yaw_threshold = float(np.clip(max(BASE_YAW_THRESHOLD, yaw_std * 2.8), BASE_YAW_THRESHOLD, 35.0))
+    pitch_abs = float(np.clip(max(BASE_PITCH_ABS, pitch_std * 2.5), BASE_PITCH_ABS, 30.0))
+    dynamic_pitch_down = pitch_abs
+    dynamic_pitch_up = -pitch_abs
+
+
+def _deprecated_determine_head_direction(yaw, pitch):
     if yaw is None:
         return "UNKNOWN"
 
@@ -132,13 +162,46 @@ def determine_head_direction(yaw, pitch):
 
     print(f"Raw → Yaw: {yaw:.1f}° Pitch: {pitch:.1f}°  |  Adjusted → Yaw: {adj_yaw:.1f}° Pitch: {adj_pitch:.1f}°")
 
-    if adj_yaw < -YAW_THRESHOLD:
+    if adj_yaw < -BASE_YAW_THRESHOLD:
         return "LEFT"
-    elif adj_yaw > YAW_THRESHOLD:
+    elif adj_yaw > BASE_YAW_THRESHOLD:
         return "RIGHT"
-    elif adj_pitch < PITCH_UP:
+    elif adj_pitch < -BASE_PITCH_ABS:
         return "UP"
-    elif adj_pitch > PITCH_DOWN:
+    elif adj_pitch > BASE_PITCH_ABS:
+        return "DOWN"
+    else:
+        return "CENTER"
+
+
+def determine_head_direction(yaw, pitch):
+    global smoothed_adj_yaw, smoothed_adj_pitch
+    if yaw is None:
+        return "UNKNOWN"
+
+    adj_yaw   = yaw   - baseline_yaw
+    adj_pitch = pitch - baseline_pitch if pitch is not None else 0
+
+    if smoothed_adj_yaw is None:
+        smoothed_adj_yaw = adj_yaw
+        smoothed_adj_pitch = adj_pitch
+    else:
+        smoothed_adj_yaw = (POSE_SMOOTHING_ALPHA * adj_yaw) + ((1.0 - POSE_SMOOTHING_ALPHA) * smoothed_adj_yaw)
+        smoothed_adj_pitch = (POSE_SMOOTHING_ALPHA * adj_pitch) + ((1.0 - POSE_SMOOTHING_ALPHA) * smoothed_adj_pitch)
+
+    print(
+        f"Raw -> Yaw: {yaw:.1f} Pitch: {pitch:.1f} | "
+        f"Adjusted -> Yaw: {adj_yaw:.1f} Pitch: {adj_pitch:.1f} | "
+        f"Smoothed -> Yaw: {smoothed_adj_yaw:.1f} Pitch: {smoothed_adj_pitch:.1f}"
+    )
+
+    if smoothed_adj_yaw < -dynamic_yaw_threshold:
+        return "LEFT"
+    elif smoothed_adj_yaw > dynamic_yaw_threshold:
+        return "RIGHT"
+    elif smoothed_adj_pitch < dynamic_pitch_up:
+        return "UP"
+    elif smoothed_adj_pitch > dynamic_pitch_down:
         return "DOWN"
     else:
         return "CENTER"
@@ -208,6 +271,7 @@ def save_violation_video(frames, filename):
 @app.post("/calibrate")
 async def calibrate(frame: UploadFile = File(...)):
     global calibration_yaws, calibration_pitches, baseline_yaw, baseline_pitch, is_calibrated
+    global smoothed_adj_yaw, smoothed_adj_pitch
 
     try:
         contents  = await frame.read()
@@ -251,12 +315,17 @@ async def calibrate(frame: UploadFile = File(...)):
                 filtered_pitches = calibration_pitches
             baseline_yaw   = float(np.mean(filtered_yaws))
             baseline_pitch = float(np.mean(filtered_pitches))
+            update_dynamic_thresholds(filtered_yaws, filtered_pitches)
+            smoothed_adj_yaw = None
+            smoothed_adj_pitch = None
             is_calibrated  = True
             print(f"✅ Calibration complete — Baseline Yaw: {baseline_yaw:.1f}° Pitch: {baseline_pitch:.1f}°")
             return {
                 "calibrated":     True,
                 "baseline_yaw":   round(baseline_yaw,   1),
                 "baseline_pitch": round(baseline_pitch, 1),
+                "yaw_threshold":  round(dynamic_yaw_threshold, 1),
+                "pitch_threshold": round(dynamic_pitch_down, 1),
                 "message":        "Calibration complete!"
             }
 
@@ -276,10 +345,21 @@ async def calibrate(frame: UploadFile = File(...)):
 @app.post("/reset-calibration")
 async def reset_calibration():
     global calibration_yaws, calibration_pitches, baseline_yaw, baseline_pitch, is_calibrated
+    global dynamic_yaw_threshold, dynamic_pitch_down, dynamic_pitch_up
+    global smoothed_adj_yaw, smoothed_adj_pitch
+    global last_tracked_direction
     calibration_yaws    = []
     calibration_pitches = []
     baseline_yaw        = 0.0
     baseline_pitch      = 0.0
+    dynamic_yaw_threshold = BASE_YAW_THRESHOLD
+    dynamic_pitch_down = BASE_PITCH_ABS
+    dynamic_pitch_up = -BASE_PITCH_ABS
+    smoothed_adj_yaw = None
+    smoothed_adj_pitch = None
+    pose_history.clear()
+    pending_clips.clear()
+    last_tracked_direction = None
     is_calibrated       = False
     print("🔄 Calibration reset")
     return {"reset": True, "message": "Calibration reset."}
@@ -297,6 +377,7 @@ async def get_stats():
 @app.post("/analyze-head-pose")
 async def analyze_head_pose(frame: UploadFile = File(...)):
     global baseline_yaw, baseline_pitch, is_calibrated, last_tracked_direction
+    global smoothed_adj_yaw, smoothed_adj_pitch
 
     try:
         contents = await frame.read()
@@ -331,6 +412,9 @@ async def analyze_head_pose(frame: UploadFile = File(...)):
                             filtered_pitches = calibration_pitches
                         baseline_yaw   = float(np.mean(filtered_yaws))
                         baseline_pitch = float(np.mean(filtered_pitches))
+                        update_dynamic_thresholds(filtered_yaws, filtered_pitches)
+                        smoothed_adj_yaw = None
+                        smoothed_adj_pitch = None
                         is_calibrated  = True
                         print(f"✅ Auto-calibration done — Baseline Yaw: {baseline_yaw:.1f}° Pitch: {baseline_pitch:.1f}°")
 
@@ -387,16 +471,19 @@ async def analyze_head_pose(frame: UploadFile = File(...)):
         video_path     = None
         event_duration = None
 
-        if current_direction in DIRECTION_TO_TYPE:
+        if current_direction in DIRECTION_TO_TYPE and check_sustained_violation(current_direction):
             vtype        = DIRECTION_TO_TYPE[current_direction]
             active_since = violation_stats[vtype]["active_since"]
             event_fired  = violation_stats[vtype]["event_fired"]
+            last_fired_at = violation_stats[vtype]["last_fired_at"]
 
             if active_since is not None and not event_fired:
                 elapsed = now - active_since
-                if elapsed >= 3.0:
+                cooldown_ok = (last_fired_at is None) or ((now - last_fired_at) >= EVENT_COOLDOWN_SECONDS)
+                if elapsed >= EVENT_MIN_SECONDS and cooldown_ok:
                     violation_stats[vtype]["count"]      += 1
                     violation_stats[vtype]["event_fired"] = True
+                    violation_stats[vtype]["last_fired_at"] = now
 
                     violation      = True
                     violation_type = vtype
@@ -411,23 +498,25 @@ async def analyze_head_pose(frame: UploadFile = File(...)):
                     video_path = video_filename
 
                     # Start collecting post-violation frames (5 more seconds)
-                    pending_clips[vtype] = {
+                    clip_id = str(uuid.uuid4())
+                    pending_clips[clip_id] = {
                         "frames":        list(frame_buffer),   # pre-violation frames
                         "filename":      video_filename,
-                        "collect_until": now + 5.0             # collect for 5 more seconds
+                        "collect_until": now + POST_VIOLATION_SECONDS,  # collect for post window
+                        "vtype":         vtype,
                     }
 
         # ---------- COLLECT POST-VIOLATION FRAMES ----------
         # Add current frame to any pending clips still within their collection window
         completed_clips = []
-        for vtype, clip in pending_clips.items():
+        for clip_id, clip in pending_clips.items():
             clip["frames"].append(img.copy() if img is not None else frame_buffer[-1])
             if now >= clip["collect_until"]:
-                completed_clips.append(vtype)
+                completed_clips.append(clip_id)
 
         # Save completed clips (post-violation window expired)
-        for vtype in completed_clips:
-            clip_data = pending_clips.pop(vtype)
+        for clip_id in completed_clips:
+            clip_data = pending_clips.pop(clip_id)
             clip_frames = clip_data["frames"]
             clip_filename = clip_data["filename"]
             loop = asyncio.get_event_loop()
@@ -461,6 +550,8 @@ async def analyze_head_pose(frame: UploadFile = File(...)):
             "roll":           round(roll,  1) if roll  is not None else None,
             "adj_yaw":        round(yaw   - baseline_yaw,   1) if yaw   is not None else None,
             "adj_pitch":      round(pitch - baseline_pitch, 1) if pitch is not None else None,
+            "yaw_threshold":  round(dynamic_yaw_threshold, 1),
+            "pitch_threshold": round(dynamic_pitch_down, 1),
             "video_path":     video_path,
             "stats":          stats_summary,
             "timestamp":      datetime.now().isoformat()

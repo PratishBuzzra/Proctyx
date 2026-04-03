@@ -51,10 +51,15 @@ RIGHT_IRIS       = 473   # iris center
 # 0.0 = far left/top, 1.0 = far right/bottom, 0.5 = center
 H_LEFT_THRESHOLD  = 0.40
 H_RIGHT_THRESHOLD = 0.60
-V_DOWN_THRESHOLD  = 0.30   # iris very near top of eye = looking DOWN
+V_DOWN_ENTER_THRESHOLD = 0.34  # easier to enter DOWN for real low-light cams
+V_DOWN_EXIT_THRESHOLD  = 0.40  # hysteresis to keep DOWN stable across jitter
 V_UP_THRESHOLD    = 0.55   # iris near bottom of eye = looking UP
 
 BLINK_EAR_THRESHOLD = 0.10  # less sensitive — only real blinks
+RATIO_SMOOTHING_ALPHA = 0.40
+EVENT_MIN_SECONDS = 3.0
+EVENT_COOLDOWN_SECONDS = 2.0
+POST_VIOLATION_SECONDS = 5.0
 
 # ---------- STATE ----------
 direction_history      = deque(maxlen=5)
@@ -62,14 +67,16 @@ frame_buffer           = deque(maxlen=10)   # 10s pre-violation footage
 executor               = ThreadPoolExecutor(max_workers=2)
 last_tracked_direction = None
 pending_clips          = {}
+smoothed_h_ratio       = None
+smoothed_v_ratio       = None
 
 # ---------- VIOLATION TRACKING ----------
 violation_stats = {
-    "GAZE_LEFT":        {"count": 0, "active_since": None, "event_fired": False},
-    "GAZE_RIGHT":       {"count": 0, "active_since": None, "event_fired": False},
-    "GAZE_DOWN":        {"count": 0, "active_since": None, "event_fired": False},
-    "GAZE_UP":          {"count": 0, "active_since": None, "event_fired": False},
-    "FACE_NOT_VISIBLE": {"count": 0, "active_since": None, "event_fired": False},
+    "GAZE_LEFT":        {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+    "GAZE_RIGHT":       {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+    "GAZE_DOWN":        {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+    "GAZE_UP":          {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+    "FACE_NOT_VISIBLE": {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
 }
 DIRECTION_TO_TYPE = {
     "LEFT":    "GAZE_LEFT",
@@ -132,19 +139,43 @@ def check_blink(landmarks, img_w, img_h):
     return ((l_ear + r_ear) / 2) < BLINK_EAR_THRESHOLD
 
 
-def determine_gaze_direction(h_ratio, v_ratio):
+def determine_gaze_direction(h_ratio, v_ratio, prev_direction=None):
+    global smoothed_h_ratio, smoothed_v_ratio
+
     if h_ratio is None:
         return "UNKNOWN"
-    if h_ratio <= H_LEFT_THRESHOLD:
-        return "LEFT"
-    elif h_ratio >= H_RIGHT_THRESHOLD:
-        return "RIGHT"
-    elif v_ratio is not None and v_ratio <= V_DOWN_THRESHOLD:
-        return "DOWN"
-    elif v_ratio is not None and v_ratio >= V_UP_THRESHOLD:
-        return "UP"
+
+    if smoothed_h_ratio is None:
+        smoothed_h_ratio = h_ratio
     else:
-        return "CENTER"
+        smoothed_h_ratio = (RATIO_SMOOTHING_ALPHA * h_ratio) + ((1.0 - RATIO_SMOOTHING_ALPHA) * smoothed_h_ratio)
+
+    if v_ratio is not None:
+        if smoothed_v_ratio is None:
+            smoothed_v_ratio = v_ratio
+        else:
+            smoothed_v_ratio = (RATIO_SMOOTHING_ALPHA * v_ratio) + ((1.0 - RATIO_SMOOTHING_ALPHA) * smoothed_v_ratio)
+
+    h_for_decision = smoothed_h_ratio if smoothed_h_ratio is not None else h_ratio
+    v_for_decision = smoothed_v_ratio if smoothed_v_ratio is not None else v_ratio
+
+    if h_for_decision <= H_LEFT_THRESHOLD:
+        return "LEFT"
+    elif h_for_decision >= H_RIGHT_THRESHOLD:
+        return "RIGHT"
+
+    # Down-specific hysteresis: easier to enter DOWN and stable while staying DOWN
+    if v_for_decision is not None:
+        if prev_direction == "DOWN":
+            if v_for_decision <= V_DOWN_EXIT_THRESHOLD:
+                return "DOWN"
+        elif v_for_decision <= V_DOWN_ENTER_THRESHOLD:
+            return "DOWN"
+
+        if v_for_decision >= V_UP_THRESHOLD:
+            return "UP"
+
+    return "CENTER"
 
 
 def check_sustained_violation(direction):
@@ -217,7 +248,7 @@ async def get_stats():
 # ---------- MAIN ENDPOINT ----------
 @app.post("/analyze-gaze")
 async def analyze_gaze(frame: UploadFile = File(...)):
-    global last_tracked_direction
+    global last_tracked_direction, smoothed_h_ratio, smoothed_v_ratio
 
     try:
         contents = await frame.read()
@@ -240,6 +271,8 @@ async def analyze_gaze(frame: UploadFile = File(...)):
         if not results.multi_face_landmarks:
             direction_history.append("NO_FACE")
             current_direction = "NO_FACE"
+            smoothed_h_ratio = None
+            smoothed_v_ratio = None
             print(f"No face | History: {list(direction_history)}")
 
         else:
@@ -248,6 +281,8 @@ async def analyze_gaze(frame: UploadFile = File(...)):
             # ---------- BLINK CHECK ----------
             if check_blink(landmarks, img_w, img_h):
                 direction_history.append("BLINK")
+                smoothed_h_ratio = None
+                smoothed_v_ratio = None
                 print(f"Blinking — skipping frame")
                 return {
                     "violation":  False,
@@ -264,7 +299,7 @@ async def analyze_gaze(frame: UploadFile = File(...)):
             if h_ratio is None:
                 return {"violation": False, "direction": "UNKNOWN", "reason": "Could not compute iris ratios"}
 
-            current_direction = determine_gaze_direction(h_ratio, v_ratio)
+            current_direction = determine_gaze_direction(h_ratio, v_ratio, last_tracked_direction)
             direction_history.append(current_direction)
 
         # ---------- PER-EVENT TRACKING ----------
@@ -293,12 +328,15 @@ async def analyze_gaze(frame: UploadFile = File(...)):
             vtype        = DIRECTION_TO_TYPE[current_direction]
             active_since = violation_stats[vtype]["active_since"]
             event_fired  = violation_stats[vtype]["event_fired"]
+            last_fired_at = violation_stats[vtype]["last_fired_at"]
 
             if active_since is not None and not event_fired:
                 elapsed = now - active_since
-                if elapsed >= 3.0:
+                cooldown_ok = (last_fired_at is None) or ((now - last_fired_at) >= EVENT_COOLDOWN_SECONDS)
+                if elapsed >= EVENT_MIN_SECONDS and cooldown_ok:
                     violation_stats[vtype]["count"]      += 1
                     violation_stats[vtype]["event_fired"] = True
+                    violation_stats[vtype]["last_fired_at"] = now
 
                     violation      = True
                     violation_type = vtype
@@ -313,21 +351,22 @@ async def analyze_gaze(frame: UploadFile = File(...)):
                     video_path = video_filename
 
                     # Start collecting post-violation frames (5 more seconds)
-                    pending_clips[vtype] = {
+                    clip_id = str(uuid.uuid4())
+                    pending_clips[clip_id] = {
                         "frames":        list(frame_buffer),
                         "filename":      video_filename,
-                        "collect_until": now + 5.0
+                        "collect_until": now + POST_VIOLATION_SECONDS
                     }
 
         # ---------- COLLECT POST-VIOLATION FRAMES ----------
         completed_clips = []
-        for vtype, clip in pending_clips.items():
+        for clip_id, clip in pending_clips.items():
             clip["frames"].append(img.copy())
             if now >= clip["collect_until"]:
-                completed_clips.append(vtype)
+                completed_clips.append(clip_id)
 
-        for vtype in completed_clips:
-            clip_data = pending_clips.pop(vtype)
+        for clip_id in completed_clips:
+            clip_data = pending_clips.pop(clip_id)
             clip_frames = clip_data["frames"]
             clip_filename = clip_data["filename"]
             loop = asyncio.get_event_loop()

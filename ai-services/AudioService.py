@@ -19,12 +19,12 @@ app.add_middleware(
 )
 
 SAMPLE_RATE      = 16000
-RMS_THRESHOLD    = 0.03
-SUSTAINED_RATIO  = 0.5
+RMS_THRESHOLD    = 0.015
+SUSTAINED_RATIO  = 0.35
 
 # Human voice frequency range
-VOICE_LOW_HZ  = 85    # lowest human voice frequency
-VOICE_HIGH_HZ = 3000  # highest human voice frequency
+VOICE_LOW_HZ  = 85
+VOICE_HIGH_HZ = 3000
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 AUDIO_VIOLATIONS_DIR = os.path.join(BASE_DIR, "audio_violations")
@@ -34,57 +34,59 @@ app.mount("/audios", StaticFiles(directory=AUDIO_VIOLATIONS_DIR), name="audio-vi
 # ---------- HELPER FUNCTIONS ----------
 
 def butter_bandpass(lowcut, highcut, fs, order=5):
-    """
-    Create a bandpass filter for human voice frequencies
-    Keeps only frequencies between lowcut and highcut Hz
-    """
-    nyq    = 0.5 * fs
-    low    = lowcut  / nyq
-    high   = highcut / nyq
-    b, a   = butter(order, [low, high], btype='band')
+    nyq  = 0.5 * fs
+    low  = lowcut  / nyq
+    high = highcut / nyq
+    b, a = butter(order, [low, high], btype='band')
     return b, a
 
 def apply_voice_filter(samples, sample_rate=SAMPLE_RATE):
-    """
-    Apply bandpass filter to keep only human voice frequencies
-    85Hz - 3000Hz
-    """
     try:
-        b, a            = butter_bandpass(VOICE_LOW_HZ, VOICE_HIGH_HZ, sample_rate)
-        filtered        = filtfilt(b, a, samples)
+        b, a     = butter_bandpass(VOICE_LOW_HZ, VOICE_HIGH_HZ, sample_rate)
+        filtered = filtfilt(b, a, samples)
         return filtered
     except Exception as e:
         print(f"Filter error: {e}")
-        return samples  # return original if filter fails
+        return samples
+
+def has_speech_zcr(samples):
+    """
+    Zero Crossing Rate check.
+    Human speech:         ZCR = 0.02 - 0.30  → pass
+    Background noise/fan: ZCR = 0.30+         → blocked
+    Traffic/random noise: ZCR = 0.35+         → blocked
+    """
+    zero_crossings = np.sum(np.abs(np.diff(np.sign(samples)))) / 2
+    zcr = zero_crossings / len(samples)
+    print(f"ZCR: {zcr:.4f}")
+    return 0.02 < zcr < 0.30
 
 def is_human_voice(samples, sample_rate=SAMPLE_RATE):
     """
-    Check if audio contains human voice using spectral analysis
-    
-    Steps:
-    1. Apply FFT to get frequency spectrum
-    2. Check energy in voice band (85-3000Hz) vs total energy
-    3. If voice band energy > 60% of total → likely human voice
+    Two checks:
+    1. FFT — voice band energy > 45% of total energy
+    2. ZCR — zero crossing rate in speech range (filters bg noise)
+    Both must pass to confirm human voice.
     """
     if len(samples) < 512:
         return False, 0.0
 
-    # FFT
+    # FFT analysis
     fft_vals  = np.abs(np.fft.rfft(samples))
     fft_freqs = np.fft.rfftfreq(len(samples), d=1.0/sample_rate)
 
-    # Energy in voice band
-    voice_mask        = (fft_freqs >= VOICE_LOW_HZ) & (fft_freqs <= VOICE_HIGH_HZ)
-    voice_energy      = np.sum(fft_vals[voice_mask] ** 2)
-    total_energy      = np.sum(fft_vals ** 2)
+    voice_mask   = (fft_freqs >= VOICE_LOW_HZ) & (fft_freqs <= VOICE_HIGH_HZ)
+    voice_energy = np.sum(fft_vals[voice_mask] ** 2)
+    total_energy = np.sum(fft_vals ** 2)
 
     if total_energy == 0:
         return False, 0.0
 
     voice_ratio = voice_energy / total_energy
 
-    # If more than 55% of energy is in voice band → human voice
-    is_voice = voice_ratio > 0.55
+    # ZCR check — this is what filters out bg noise
+    zcr_ok   = has_speech_zcr(samples)
+    is_voice = voice_ratio > 0.45 and zcr_ok
 
     return is_voice, voice_ratio
 
@@ -103,25 +105,25 @@ async def analyze_audio(request: Request):
         if len(samples) == 0:
             return {"violation": False, "type": None, "severity": None}
 
-        # ---------- STEP 1: Check if human voice present ----------
+        # STEP 1: Check if human voice present (with ZCR filter)
         is_voice, voice_ratio = is_human_voice(samples)
 
         if not is_voice:
-            print(f"No human voice detected | Voice ratio: {voice_ratio:.3f}")
+            print(f"No human voice | Voice ratio: {voice_ratio:.3f}")
             return {
-                "violation":  False,
-                "type":       None,
-                "severity":   None,
-                "loud_ratio": 0,
+                "violation":   False,
+                "type":        None,
+                "severity":    None,
+                "loud_ratio":  0,
                 "voice_ratio": round(float(voice_ratio), 3),
-                "reason":     "Background noise only, no human voice",
-                "timestamp":  datetime.now().isoformat()
+                "reason":      "Background noise only, no human voice",
+                "timestamp":   datetime.now().isoformat()
             }
 
-        # ---------- STEP 2: Apply voice filter ----------
+        # STEP 2: Apply voice filter
         filtered_samples = apply_voice_filter(samples)
 
-        # ---------- STEP 3: RMS analysis on filtered audio ----------
+        # STEP 3: RMS analysis on filtered audio
         frame_length = 1024
         hop_length   = 512
         num_frames   = (len(filtered_samples) - frame_length) // hop_length + 1
@@ -141,7 +143,7 @@ async def analyze_audio(request: Request):
         total_frames  = len(rms_per_frame)
         loud_ratio    = loud_frames / total_frames if total_frames > 0 else 0
 
-        # ---------- STEP 4: Violation check ----------
+        # STEP 4: Violation check
         violation      = False
         violation_type = None
         severity       = None
@@ -154,11 +156,10 @@ async def analyze_audio(request: Request):
             severity       = "high" if loud_ratio > 0.8 else "medium"
             description    = f"Human voice detected ({round(loud_ratio * 100)}% of chunk)"
 
-            # Save WAV file
-            filename         = f"{uuid.uuid4()}.wav"
-            save_path        = os.path.join(AUDIO_VIOLATIONS_DIR, filename)
-            audio_path       = filename
-            samples_int16    = (filtered_samples * 32767).astype(np.int16)
+            filename      = f"{uuid.uuid4()}.wav"
+            save_path     = os.path.join(AUDIO_VIOLATIONS_DIR, filename)
+            audio_path    = filename
+            samples_int16 = (filtered_samples * 32767).astype(np.int16)
 
             with wave.open(save_path, 'w') as wav_file:
                 wav_file.setnchannels(1)
@@ -169,12 +170,12 @@ async def analyze_audio(request: Request):
             print(f"Violation audio saved: {save_path}")
 
         print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        print(f"Voice ratio    : {voice_ratio:.3f}")
-        print(f"Loud ratio     : {loud_ratio:.3f}")
-        print(f"Human voice    : {is_voice}")
-        print(f"Violation      : {violation}")
+        print(f"Voice ratio : {voice_ratio:.3f}")
+        print(f"Loud ratio  : {loud_ratio:.3f}")
+        print(f"Human voice : {is_voice}")
+        print(f"Violation   : {violation}")
         if violation:
-            print(f"Severity       : {severity}")
+            print(f"Severity    : {severity}")
         print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         return {

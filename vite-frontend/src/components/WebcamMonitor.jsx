@@ -4,6 +4,7 @@ import useCameraDevices from "../hooks/useCamerDevices";
 
 const FASTAPI_GAZE_URL    = "http://localhost:8003";
 const FASTAPI_HEAD_URL    = "http://localhost:8004";
+const FASTAPI_OBJECT_URL  = "http://localhost:8005";
 const NODE_URL            = "http://localhost:3000/api/v1";
 const CAPTURE_INTERVAL_MS = 1000;
 const CALIBRATION_COUNT   = 15;
@@ -14,6 +15,8 @@ const normalizeVideoPath = (videoPath) => {
   if (!normalized.toLowerCase().endsWith(".mp4")) return null;
   return normalized.split("/").pop() || null;
 };
+
+const buildSessionId = (examId, studentId) => `${examId}:${studentId}`;
 
 const WebcamMonitor = ({ examId, studentId, active = true }) => {
   const videoRef    = useRef(null);
@@ -86,9 +89,14 @@ const WebcamMonitor = ({ examId, studentId, active = true }) => {
         canvas.toBlob(async (blob) => {
           if (!blob) return resolve();
           try {
+            const sessionId = buildSessionId(examId, studentId);
             const formData = new FormData();
             formData.append("frame", blob, "frame.jpg");
-            const res    = await fetch(`${FASTAPI_HEAD_URL}/calibrate`, { method: "POST", body: formData });
+            const res = await fetch(`${FASTAPI_HEAD_URL}/calibrate`, {
+              method: "POST",
+              headers: { "X-Session-Id": sessionId },
+              body: formData,
+            });
             const result = await res.json();
 
             setCalibProgress(result.collected || CALIBRATION_COUNT);
@@ -110,9 +118,14 @@ const WebcamMonitor = ({ examId, studentId, active = true }) => {
 
     const analyzeGaze = async (blob) => {
       try {
+        const sessionId = buildSessionId(examId, studentId);
         const formData = new FormData();
         formData.append("frame", blob, "frame.jpg");
-        const res    = await fetch(`${FASTAPI_GAZE_URL}/analyze-gaze`, { method: "POST", body: formData });
+        const res = await fetch(`${FASTAPI_GAZE_URL}/analyze-gaze`, {
+          method: "POST",
+          headers: { "X-Session-Id": sessionId },
+          body: formData,
+        });
         const result = await res.json();
         console.log(`Gaze: ${result.direction}`);
         if (result.violation) {
@@ -130,9 +143,14 @@ const WebcamMonitor = ({ examId, studentId, active = true }) => {
 
     const analyzeHeadPose = async (blob) => {
       try {
+        const sessionId = buildSessionId(examId, studentId);
         const formData = new FormData();
         formData.append("frame", blob, "frame.jpg");
-        const res    = await fetch(`${FASTAPI_HEAD_URL}/analyze-head-pose`, { method: "POST", body: formData });
+        const res = await fetch(`${FASTAPI_HEAD_URL}/analyze-head-pose`, {
+          method: "POST",
+          headers: { "X-Session-Id": sessionId },
+          body: formData,
+        });
         const result = await res.json();
 
         // Update calibration status from response
@@ -154,6 +172,35 @@ const WebcamMonitor = ({ examId, studentId, active = true }) => {
         }
       } catch (err) {
         console.error("Head pose error:", err);
+      }
+    };
+
+    const analyzeObjectDetection = async (blob) => {
+      try {
+        const sessionId = buildSessionId(examId, studentId);
+        const formData = new FormData();
+        formData.append("frame", blob, "frame.jpg");
+        const res = await fetch(`${FASTAPI_OBJECT_URL}/detect-objects`, {
+          method: "POST",
+          headers: { "X-Session-Id": sessionId },
+          body: formData,
+        });
+        const result = await res.json();
+
+        if (result?.violation && Array.isArray(result.violations)) {
+          await Promise.all(
+            result.violations.map((v) =>
+              storeViolation({
+                type: v.type,
+                severity: v.severity || "medium",
+                description: v.description || "Object violation detected",
+                videoPath: normalizeVideoPath(v.videoPath),
+              })
+            )
+          );
+        }
+      } catch (err) {
+        console.error("Object detection error:", err);
       }
     };
 
@@ -184,7 +231,7 @@ const WebcamMonitor = ({ examId, studentId, active = true }) => {
       // Phase 2: normal monitoring
       canvas.toBlob(async (blob) => {
         if (!blob) return;
-        await Promise.all([analyzeGaze(blob), analyzeHeadPose(blob)]);
+        await Promise.all([analyzeGaze(blob), analyzeHeadPose(blob), analyzeObjectDetection(blob)]);
       }, "image/jpeg", 0.8);
     };
 
@@ -199,7 +246,11 @@ const WebcamMonitor = ({ examId, studentId, active = true }) => {
 
   const handleRecalibrate = async () => {
     try {
-      await fetch(`${FASTAPI_HEAD_URL}/reset-calibration`, { method: "POST" });
+      const sessionId = buildSessionId(examId, studentId);
+      await fetch(`${FASTAPI_HEAD_URL}/reset-calibration`, {
+        method: "POST",
+        headers: { "X-Session-Id": sessionId },
+      });
       setCalibrated(false);
       setCalibProgress(0);
       calibFrameCount.current = 0;

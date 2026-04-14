@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, Header, UploadFile
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
@@ -62,22 +62,58 @@ EVENT_COOLDOWN_SECONDS = 2.0
 POST_VIOLATION_SECONDS = 5.0
 
 # ---------- STATE ----------
-direction_history      = deque(maxlen=5)
-frame_buffer           = deque(maxlen=10)   # 10s pre-violation footage
 executor               = ThreadPoolExecutor(max_workers=2)
-last_tracked_direction = None
-pending_clips          = {}
-smoothed_h_ratio       = None
-smoothed_v_ratio       = None
+SESSION_TIMEOUT_SECONDS = 120.0
+
+
+def new_violation_stats():
+    return {
+        "GAZE_LEFT":        {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+        "GAZE_RIGHT":       {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+        "GAZE_DOWN":        {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+        "GAZE_UP":          {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+        "FACE_NOT_VISIBLE": {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+    }
+
+
+# session_id -> per-session runtime state
+session_states = {}
+
+
+def init_session_state():
+    return {
+        "direction_history": deque(maxlen=5),
+        "frame_buffer": deque(maxlen=10),
+        "last_tracked_direction": None,
+        "pending_clips": {},
+        "smoothed_h_ratio": None,
+        "smoothed_v_ratio": None,
+        "violation_stats": new_violation_stats(),
+        "last_seen": time.time(),
+    }
+
+
+def get_session_state(session_id):
+    state = session_states.get(session_id)
+    if state is None:
+        state = init_session_state()
+        session_states[session_id] = state
+    state["last_seen"] = time.time()
+    return state
+
+
+def cleanup_inactive_sessions():
+    now = time.time()
+    stale_ids = [
+        sid
+        for sid, state in session_states.items()
+        if now - state.get("last_seen", now) > SESSION_TIMEOUT_SECONDS
+    ]
+    for sid in stale_ids:
+        session_states.pop(sid, None)
+
 
 # ---------- VIOLATION TRACKING ----------
-violation_stats = {
-    "GAZE_LEFT":        {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
-    "GAZE_RIGHT":       {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
-    "GAZE_DOWN":        {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
-    "GAZE_UP":          {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
-    "FACE_NOT_VISIBLE": {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
-}
 DIRECTION_TO_TYPE = {
     "LEFT":    "GAZE_LEFT",
     "RIGHT":   "GAZE_RIGHT",
@@ -139,11 +175,9 @@ def check_blink(landmarks, img_w, img_h):
     return ((l_ear + r_ear) / 2) < BLINK_EAR_THRESHOLD
 
 
-def determine_gaze_direction(h_ratio, v_ratio, prev_direction=None):
-    global smoothed_h_ratio, smoothed_v_ratio
-
+def determine_gaze_direction(h_ratio, v_ratio, prev_direction, smoothed_h_ratio, smoothed_v_ratio):
     if h_ratio is None:
-        return "UNKNOWN"
+        return "UNKNOWN", smoothed_h_ratio, smoothed_v_ratio
 
     if smoothed_h_ratio is None:
         smoothed_h_ratio = h_ratio
@@ -160,25 +194,25 @@ def determine_gaze_direction(h_ratio, v_ratio, prev_direction=None):
     v_for_decision = smoothed_v_ratio if smoothed_v_ratio is not None else v_ratio
 
     if h_for_decision <= H_LEFT_THRESHOLD:
-        return "LEFT"
+        return "LEFT", smoothed_h_ratio, smoothed_v_ratio
     elif h_for_decision >= H_RIGHT_THRESHOLD:
-        return "RIGHT"
+        return "RIGHT", smoothed_h_ratio, smoothed_v_ratio
 
     # Down-specific hysteresis: easier to enter DOWN and stable while staying DOWN
     if v_for_decision is not None:
         if prev_direction == "DOWN":
             if v_for_decision <= V_DOWN_EXIT_THRESHOLD:
-                return "DOWN"
+                return "DOWN", smoothed_h_ratio, smoothed_v_ratio
         elif v_for_decision <= V_DOWN_ENTER_THRESHOLD:
-            return "DOWN"
+            return "DOWN", smoothed_h_ratio, smoothed_v_ratio
 
         if v_for_decision >= V_UP_THRESHOLD:
-            return "UP"
+            return "UP", smoothed_h_ratio, smoothed_v_ratio
 
-    return "CENTER"
+    return "CENTER", smoothed_h_ratio, smoothed_v_ratio
 
 
-def check_sustained_violation(direction):
+def check_sustained_violation(direction, direction_history):
     recent = list(direction_history)
     count  = 0
     for d in reversed(recent):
@@ -241,21 +275,49 @@ def save_violation_video(frames, filename):
 # ---------- STATS ENDPOINT ----------
 @app.get("/stats")
 async def get_stats():
-    summary = {vt: {"count": data["count"]} for vt, data in violation_stats.items()}
-    return {"stats": summary, "timestamp": datetime.now().isoformat()}
+    aggregated = {vt: {"count": 0} for vt in new_violation_stats().keys()}
+    for state in session_states.values():
+        for vt, data in state["violation_stats"].items():
+            aggregated[vt]["count"] += data["count"]
+    return {
+        "active_sessions": len(session_states),
+        "stats": aggregated,
+        "timestamp": datetime.now().isoformat(),
+    }
 
 
 # ---------- MAIN ENDPOINT ----------
 @app.post("/analyze-gaze")
-async def analyze_gaze(frame: UploadFile = File(...)):
-    global last_tracked_direction, smoothed_h_ratio, smoothed_v_ratio
+async def analyze_gaze(
+    frame: UploadFile = File(...),
+    x_session_id: str | None = Header(default=None),
+):
 
     try:
+        cleanup_inactive_sessions()
+        session_id = (x_session_id or "").strip() or "default"
+        state = get_session_state(session_id)
+
+        direction_history = state["direction_history"]
+        frame_buffer = state["frame_buffer"]
+        pending_clips = state["pending_clips"]
+        violation_stats = state["violation_stats"]
+        last_tracked_direction = state["last_tracked_direction"]
+        smoothed_h_ratio = state["smoothed_h_ratio"]
+        smoothed_v_ratio = state["smoothed_v_ratio"]
+
+        def persist_session_state():
+            state["last_tracked_direction"] = last_tracked_direction
+            state["smoothed_h_ratio"] = smoothed_h_ratio
+            state["smoothed_v_ratio"] = smoothed_v_ratio
+            state["last_seen"] = time.time()
+
         contents = await frame.read()
         np_arr   = np.frombuffer(contents, np.uint8)
         img      = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
         if img is None:
+            persist_session_state()
             return {"violation": False, "direction": "UNKNOWN", "reason": "Invalid image"}
 
         frame_buffer.append(img.copy())
@@ -284,6 +346,7 @@ async def analyze_gaze(frame: UploadFile = File(...)):
                 smoothed_h_ratio = None
                 smoothed_v_ratio = None
                 print(f"Blinking — skipping frame")
+                persist_session_state()
                 return {
                     "violation":  False,
                     "direction":  "BLINK",
@@ -297,9 +360,12 @@ async def analyze_gaze(frame: UploadFile = File(...)):
             h_ratio, v_ratio = get_iris_ratios(landmarks, img_w, img_h)
 
             if h_ratio is None:
+                persist_session_state()
                 return {"violation": False, "direction": "UNKNOWN", "reason": "Could not compute iris ratios"}
 
-            current_direction = determine_gaze_direction(h_ratio, v_ratio, last_tracked_direction)
+            current_direction, smoothed_h_ratio, smoothed_v_ratio = determine_gaze_direction(
+                h_ratio, v_ratio, last_tracked_direction, smoothed_h_ratio, smoothed_v_ratio
+            )
             direction_history.append(current_direction)
 
         # ---------- PER-EVENT TRACKING ----------
@@ -324,7 +390,7 @@ async def analyze_gaze(frame: UploadFile = File(...)):
         video_path     = None
         event_duration = None
 
-        if current_direction in DIRECTION_TO_TYPE and check_sustained_violation(current_direction):
+        if current_direction in DIRECTION_TO_TYPE and check_sustained_violation(current_direction, direction_history):
             vtype        = DIRECTION_TO_TYPE[current_direction]
             active_since = violation_stats[vtype]["active_since"]
             event_fired  = violation_stats[vtype]["event_fired"]
@@ -379,7 +445,7 @@ async def analyze_gaze(frame: UploadFile = File(...)):
         print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         if h_ratio is not None:
             print(f"H Ratio: {h_ratio:.3f}  V Ratio: {v_ratio:.3f}")
-        print(f"Direction: {current_direction} | History: {list(direction_history)}")
+        print(f"[session={session_id}] Direction: {current_direction} | History: {list(direction_history)}")
         if violation:
             print(f"🚨 Violation: {violation_type} | Duration: {event_duration}s | Count: {violation_stats[violation_type]['count']}")
         active_counts = {vt: d["count"] for vt, d in violation_stats.items() if d["count"] > 0}
@@ -387,7 +453,9 @@ async def analyze_gaze(frame: UploadFile = File(...)):
             print(f"Counts: {active_counts}")
         print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
+        persist_session_state()
         return {
+            "session_id":     session_id,
             "violation":      violation,
             "type":           violation_type,
             "severity":       severity,

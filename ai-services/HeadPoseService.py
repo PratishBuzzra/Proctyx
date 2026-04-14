@@ -1,17 +1,18 @@
-import cv2
-import numpy as np
-from fastapi import FastAPI, File, UploadFile
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime
-from collections import deque
-import os
-import uuid
 import asyncio
-import time
+import os
 import subprocess
+import time
+import uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+
+import cv2
 import mediapipe as mp
+import numpy as np
+from fastapi import FastAPI, File, Header, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI()
 
@@ -29,60 +30,83 @@ face_mesh = mp_face_mesh.FaceMesh(
     max_num_faces=1,
     refine_landmarks=True,
     min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
+    min_tracking_confidence=0.5,
 )
 
-BASE_YAW_THRESHOLD  = 20.0
-BASE_PITCH_ABS      = 15.0
-
-# Runtime thresholds (updated after calibration)
-dynamic_yaw_threshold = BASE_YAW_THRESHOLD
-dynamic_pitch_down    = BASE_PITCH_ABS
-dynamic_pitch_up      = -BASE_PITCH_ABS
-
-# Stability controls
-POSE_SMOOTHING_ALPHA   = 0.35
-EVENT_MIN_SECONDS      = 3.0
+BASE_YAW_THRESHOLD = 20.0
+BASE_PITCH_ABS = 15.0
+POSE_SMOOTHING_ALPHA = 0.35
+EVENT_MIN_SECONDS = 3.0
 POST_VIOLATION_SECONDS = 5.0
 EVENT_COOLDOWN_SECONDS = 2.0
+CALIBRATION_COUNT = 15
+SESSION_TIMEOUT_SECONDS = 120.0
 
-pose_history  = deque(maxlen=5)
-frame_buffer  = deque(maxlen=10)   # keep 10s of pre-violation footage
-executor      = ThreadPoolExecutor(max_workers=2)
-smoothed_adj_yaw   = None
-smoothed_adj_pitch = None
-
-# Pending violation clips: tracks violations waiting for post-violation frames
-# {clip_id: {"frames": [...pre+violation frames], "collect_until": timestamp, "filename": "...", "vtype": "..."}}
-pending_clips = {}
+executor = ThreadPoolExecutor(max_workers=2)
 
 # ---------- VIOLATION TRACKING ----------
-# count       = how many times they looked away for 3+ seconds
-# active_since = when the current look-away event started
-# event_fired  = True once violation fires for this event (prevents re-firing same event)
-violation_stats = {
-    "HEAD_LEFT":        {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
-    "HEAD_RIGHT":       {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
-    "HEAD_DOWN":        {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
-    "HEAD_UP":          {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
-    "FACE_NOT_VISIBLE": {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
-}
 DIRECTION_TO_TYPE = {
-    "LEFT":    "HEAD_LEFT",
-    "RIGHT":   "HEAD_RIGHT",
-    "DOWN":    "HEAD_DOWN",
-    "UP":      "HEAD_UP",
+    "LEFT": "HEAD_LEFT",
+    "RIGHT": "HEAD_RIGHT",
+    "DOWN": "HEAD_DOWN",
+    "UP": "HEAD_UP",
     "NO_FACE": "FACE_NOT_VISIBLE",
 }
-last_tracked_direction = None
 
-# ---------- CALIBRATION STATE ----------
-CALIBRATION_COUNT   = 15
-calibration_yaws    = []
-calibration_pitches = []
-baseline_yaw        = 0.0
-baseline_pitch      = 0.0
-is_calibrated       = False
+
+def new_violation_stats():
+    return {
+        "HEAD_LEFT": {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+        "HEAD_RIGHT": {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+        "HEAD_DOWN": {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+        "HEAD_UP": {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+        "FACE_NOT_VISIBLE": {"count": 0, "active_since": None, "event_fired": False, "last_fired_at": None},
+    }
+
+
+def init_session_state():
+    return {
+        "dynamic_yaw_threshold": BASE_YAW_THRESHOLD,
+        "dynamic_pitch_down": BASE_PITCH_ABS,
+        "dynamic_pitch_up": -BASE_PITCH_ABS,
+        "pose_history": deque(maxlen=5),
+        "frame_buffer": deque(maxlen=10),
+        "pending_clips": {},
+        "smoothed_adj_yaw": None,
+        "smoothed_adj_pitch": None,
+        "violation_stats": new_violation_stats(),
+        "last_tracked_direction": None,
+        "calibration_yaws": [],
+        "calibration_pitches": [],
+        "baseline_yaw": 0.0,
+        "baseline_pitch": 0.0,
+        "is_calibrated": False,
+        "last_seen": time.time(),
+    }
+
+
+session_states = {}
+
+
+def get_session_state(session_id):
+    state = session_states.get(session_id)
+    if state is None:
+        state = init_session_state()
+        session_states[session_id] = state
+    state["last_seen"] = time.time()
+    return state
+
+
+def cleanup_inactive_sessions():
+    now = time.time()
+    stale_ids = [
+        sid
+        for sid, state in session_states.items()
+        if now - state.get("last_seen", now) > SESSION_TIMEOUT_SECONDS
+    ]
+    for sid in stale_ids:
+        session_states.pop(sid, None)
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 HEAD_VIOLATIONS_DIR = os.path.join(BASE_DIR, "head_violations")
@@ -90,12 +114,12 @@ os.makedirs(HEAD_VIOLATIONS_DIR, exist_ok=True)
 app.mount("/videos", StaticFiles(directory=HEAD_VIOLATIONS_DIR), name="head-violation-videos")
 
 # ---------- LANDMARKS ----------
-NOSE_TIP      = 1
-FOREHEAD      = 10
-CHIN          = 152
-LEFT_EAR      = 234
-RIGHT_EAR     = 454
-LEFT_EYE_OUT  = 33
+NOSE_TIP = 1
+FOREHEAD = 10
+CHIN = 152
+LEFT_EAR = 234
+RIGHT_EAR = 454
+LEFT_EYE_OUT = 33
 RIGHT_EYE_OUT = 263
 
 
@@ -103,113 +127,94 @@ def get_head_angles(landmarks, img_w, img_h):
     def lm(idx):
         return np.array([landmarks[idx].x * img_w, landmarks[idx].y * img_h])
 
-    nose      = lm(NOSE_TIP)
-    forehead  = lm(FOREHEAD)
-    chin      = lm(CHIN)
-    left_ear  = lm(LEFT_EAR)
+    nose = lm(NOSE_TIP)
+    forehead = lm(FOREHEAD)
+    chin = lm(CHIN)
+    left_ear = lm(LEFT_EAR)
     right_ear = lm(RIGHT_EAR)
-    left_eye  = lm(LEFT_EYE_OUT)
+    left_eye = lm(LEFT_EYE_OUT)
     right_eye = lm(RIGHT_EYE_OUT)
 
-    ear_mid   = (left_ear + right_ear) / 2
+    ear_mid = (left_ear + right_ear) / 2
     ear_width = np.linalg.norm(right_ear - left_ear)
     if ear_width < 1:
         return None, None, None
 
     yaw_raw = (nose[0] - ear_mid[0]) / (ear_width / 2)
-    yaw     = float(np.degrees(np.arcsin(np.clip(yaw_raw, -1, 1))) * 2.5)
-    yaw     = float(np.clip(yaw, -90.0, 90.0))  # prevent ±225° garbage values
+    yaw = float(np.degrees(np.arcsin(np.clip(yaw_raw, -1, 1))) * 2.5)
+    yaw = float(np.clip(yaw, -90.0, 90.0))
 
     face_height = np.linalg.norm(chin - forehead)
     if face_height < 1:
         return yaw, None, None
 
-    face_mid  = (forehead + chin) / 2
+    face_mid = (forehead + chin) / 2
     pitch_raw = (nose[1] - face_mid[1]) / (face_height / 2)
-    pitch     = float(np.degrees(np.arcsin(np.clip(pitch_raw, -1, 1))) * 2.0)
-    pitch     = float(np.clip(pitch, -90.0, 90.0))
+    pitch = float(np.degrees(np.arcsin(np.clip(pitch_raw, -1, 1))) * 2.0)
+    pitch = float(np.clip(pitch, -90.0, 90.0))
 
     eye_delta = right_eye - left_eye
-    roll      = float(np.degrees(np.arctan2(eye_delta[1], eye_delta[0])))
+    roll = float(np.degrees(np.arctan2(eye_delta[1], eye_delta[0])))
 
     return yaw, pitch, roll
 
 
-def update_dynamic_thresholds(yaws, pitches):
-    global dynamic_yaw_threshold, dynamic_pitch_down, dynamic_pitch_up
-
+def update_dynamic_thresholds(state, yaws, pitches):
     if not yaws or not pitches:
-        dynamic_yaw_threshold = BASE_YAW_THRESHOLD
-        dynamic_pitch_down = BASE_PITCH_ABS
-        dynamic_pitch_up = -BASE_PITCH_ABS
+        state["dynamic_yaw_threshold"] = BASE_YAW_THRESHOLD
+        state["dynamic_pitch_down"] = BASE_PITCH_ABS
+        state["dynamic_pitch_up"] = -BASE_PITCH_ABS
         return
 
     yaw_std = float(np.std(yaws))
     pitch_std = float(np.std(pitches))
 
-    dynamic_yaw_threshold = float(np.clip(max(BASE_YAW_THRESHOLD, yaw_std * 2.8), BASE_YAW_THRESHOLD, 35.0))
+    state["dynamic_yaw_threshold"] = float(
+        np.clip(max(BASE_YAW_THRESHOLD, yaw_std * 2.8), BASE_YAW_THRESHOLD, 35.0)
+    )
     pitch_abs = float(np.clip(max(BASE_PITCH_ABS, pitch_std * 2.5), BASE_PITCH_ABS, 30.0))
-    dynamic_pitch_down = pitch_abs
-    dynamic_pitch_up = -pitch_abs
+    state["dynamic_pitch_down"] = pitch_abs
+    state["dynamic_pitch_up"] = -pitch_abs
 
 
-def _deprecated_determine_head_direction(yaw, pitch):
+def determine_head_direction(state, yaw, pitch):
     if yaw is None:
         return "UNKNOWN"
 
-    adj_yaw   = yaw   - baseline_yaw
-    adj_pitch = pitch - baseline_pitch if pitch is not None else 0
+    adj_yaw = yaw - state["baseline_yaw"]
+    adj_pitch = pitch - state["baseline_pitch"] if pitch is not None else 0
 
-    print(f"Raw → Yaw: {yaw:.1f}° Pitch: {pitch:.1f}°  |  Adjusted → Yaw: {adj_yaw:.1f}° Pitch: {adj_pitch:.1f}°")
-
-    if adj_yaw < -BASE_YAW_THRESHOLD:
-        return "LEFT"
-    elif adj_yaw > BASE_YAW_THRESHOLD:
-        return "RIGHT"
-    elif adj_pitch < -BASE_PITCH_ABS:
-        return "UP"
-    elif adj_pitch > BASE_PITCH_ABS:
-        return "DOWN"
+    if state["smoothed_adj_yaw"] is None:
+        state["smoothed_adj_yaw"] = adj_yaw
+        state["smoothed_adj_pitch"] = adj_pitch
     else:
-        return "CENTER"
-
-
-def determine_head_direction(yaw, pitch):
-    global smoothed_adj_yaw, smoothed_adj_pitch
-    if yaw is None:
-        return "UNKNOWN"
-
-    adj_yaw   = yaw   - baseline_yaw
-    adj_pitch = pitch - baseline_pitch if pitch is not None else 0
-
-    if smoothed_adj_yaw is None:
-        smoothed_adj_yaw = adj_yaw
-        smoothed_adj_pitch = adj_pitch
-    else:
-        smoothed_adj_yaw = (POSE_SMOOTHING_ALPHA * adj_yaw) + ((1.0 - POSE_SMOOTHING_ALPHA) * smoothed_adj_yaw)
-        smoothed_adj_pitch = (POSE_SMOOTHING_ALPHA * adj_pitch) + ((1.0 - POSE_SMOOTHING_ALPHA) * smoothed_adj_pitch)
+        state["smoothed_adj_yaw"] = (POSE_SMOOTHING_ALPHA * adj_yaw) + (
+            (1.0 - POSE_SMOOTHING_ALPHA) * state["smoothed_adj_yaw"]
+        )
+        state["smoothed_adj_pitch"] = (POSE_SMOOTHING_ALPHA * adj_pitch) + (
+            (1.0 - POSE_SMOOTHING_ALPHA) * state["smoothed_adj_pitch"]
+        )
 
     print(
         f"Raw -> Yaw: {yaw:.1f} Pitch: {pitch:.1f} | "
         f"Adjusted -> Yaw: {adj_yaw:.1f} Pitch: {adj_pitch:.1f} | "
-        f"Smoothed -> Yaw: {smoothed_adj_yaw:.1f} Pitch: {smoothed_adj_pitch:.1f}"
+        f"Smoothed -> Yaw: {state['smoothed_adj_yaw']:.1f} Pitch: {state['smoothed_adj_pitch']:.1f}"
     )
 
-    if smoothed_adj_yaw < -dynamic_yaw_threshold:
+    if state["smoothed_adj_yaw"] < -state["dynamic_yaw_threshold"]:
         return "LEFT"
-    elif smoothed_adj_yaw > dynamic_yaw_threshold:
+    if state["smoothed_adj_yaw"] > state["dynamic_yaw_threshold"]:
         return "RIGHT"
-    elif smoothed_adj_pitch < dynamic_pitch_up:
+    if state["smoothed_adj_pitch"] < state["dynamic_pitch_up"]:
         return "UP"
-    elif smoothed_adj_pitch > dynamic_pitch_down:
+    if state["smoothed_adj_pitch"] > state["dynamic_pitch_down"]:
         return "DOWN"
-    else:
-        return "CENTER"
+    return "CENTER"
 
 
-def check_sustained_violation(direction):
+def check_sustained_violation(direction, pose_history):
     recent = list(pose_history)
-    count  = 0
+    count = 0
     for d in reversed(recent):
         if d == direction:
             count += 1
@@ -224,23 +229,26 @@ def save_violation_video(frames, filename):
     temp_path = None
     try:
         video_path = os.path.join(HEAD_VIOLATIONS_DIR, filename)
-        temp_path  = os.path.join(HEAD_VIOLATIONS_DIR, f"tmp_{filename}")
-        h, w       = frames[0].shape[:2]
-        fourcc     = cv2.VideoWriter_fourcc(*'mp4v')
-        out        = cv2.VideoWriter(temp_path, fourcc, 1.0, (w, h))
+        temp_path = os.path.join(HEAD_VIOLATIONS_DIR, f"tmp_{filename}")
+        h, w = frames[0].shape[:2]
+        out = cv2.VideoWriter(temp_path, cv2.VideoWriter_fourcc(*"mp4v"), 1.0, (w, h))
         for f in frames:
             out.write(f)
         out.release()
 
-        # Browser-friendly H.264 output for HTML5 <video> playback
         ffmpeg_cmd = [
             "ffmpeg",
             "-y",
-            "-loglevel", "error",
-            "-i", temp_path,
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
+            "-loglevel",
+            "error",
+            "-i",
+            temp_path,
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
             video_path,
         ]
         transcode = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
@@ -252,7 +260,6 @@ def save_violation_video(frames, filename):
             print(f"Violation video saved: {video_path}")
             return video_path
 
-        # Fallback: keep original file if transcode fails
         if temp_path and os.path.exists(temp_path):
             os.replace(temp_path, video_path)
         print(f"FFmpeg transcode failed, saved fallback video: {video_path}")
@@ -269,120 +276,135 @@ def save_violation_video(frames, filename):
 
 # ---------- CALIBRATION ENDPOINT ----------
 @app.post("/calibrate")
-async def calibrate(frame: UploadFile = File(...)):
-    global calibration_yaws, calibration_pitches, baseline_yaw, baseline_pitch, is_calibrated
-    global smoothed_adj_yaw, smoothed_adj_pitch
-
+async def calibrate(
+    frame: UploadFile = File(...),
+    x_session_id: str | None = Header(default=None),
+):
     try:
-        contents  = await frame.read()
-        np_arr    = np.frombuffer(contents, np.uint8)
-        img       = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        cleanup_inactive_sessions()
+        session_id = (x_session_id or "").strip() or "default"
+        state = get_session_state(session_id)
+
+        contents = await frame.read()
+        np_arr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
         if img is None:
             return {"calibrated": False, "reason": "Invalid image"}
 
         img_h, img_w = img.shape[:2]
-        frame_rgb    = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        results      = face_mesh.process(frame_rgb)
+        frame_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(frame_rgb)
 
         if not results.multi_face_landmarks:
             return {
-                "calibrated": is_calibrated,
-                "collected":  len(calibration_yaws),
-                "needed":     CALIBRATION_COUNT,
-                "reason":     "No face detected — look straight at the camera"
+                "session_id": session_id,
+                "calibrated": state["is_calibrated"],
+                "collected": len(state["calibration_yaws"]),
+                "needed": CALIBRATION_COUNT,
+                "reason": "No face detected - look straight at the camera",
             }
 
-        landmarks        = results.multi_face_landmarks[0].landmark
-        yaw, pitch, roll = get_head_angles(landmarks, img_w, img_h)
+        landmarks = results.multi_face_landmarks[0].landmark
+        yaw, pitch, _ = get_head_angles(landmarks, img_w, img_h)
 
         if yaw is None or pitch is None:
             return {"calibrated": False, "reason": "Could not compute angles"}
 
-        calibration_yaws.append(yaw)
-        calibration_pitches.append(pitch)
-
-        collected = len(calibration_yaws)
-        print(f"Calibration frame {collected}/{CALIBRATION_COUNT} — Yaw: {yaw:.1f}° Pitch: {pitch:.1f}°")
+        state["calibration_yaws"].append(yaw)
+        state["calibration_pitches"].append(pitch)
+        collected = len(state["calibration_yaws"])
+        print(f"[session={session_id}] Calibration frame {collected}/{CALIBRATION_COUNT} - Yaw: {yaw:.1f} Pitch: {pitch:.1f}")
 
         if collected >= CALIBRATION_COUNT:
-            yaw_median       = float(np.median(calibration_yaws))
-            pitch_median     = float(np.median(calibration_pitches))
-            filtered_yaws    = [y for y in calibration_yaws    if abs(y - yaw_median)   < 15]
-            filtered_pitches = [p for p in calibration_pitches if abs(p - pitch_median) < 15]
+            yaw_median = float(np.median(state["calibration_yaws"]))
+            pitch_median = float(np.median(state["calibration_pitches"]))
+            filtered_yaws = [y for y in state["calibration_yaws"] if abs(y - yaw_median) < 15]
+            filtered_pitches = [p for p in state["calibration_pitches"] if abs(p - pitch_median) < 15]
             if len(filtered_yaws) < 5:
-                filtered_yaws    = calibration_yaws
-                filtered_pitches = calibration_pitches
-            baseline_yaw   = float(np.mean(filtered_yaws))
-            baseline_pitch = float(np.mean(filtered_pitches))
-            update_dynamic_thresholds(filtered_yaws, filtered_pitches)
-            smoothed_adj_yaw = None
-            smoothed_adj_pitch = None
-            is_calibrated  = True
-            print(f"✅ Calibration complete — Baseline Yaw: {baseline_yaw:.1f}° Pitch: {baseline_pitch:.1f}°")
+                filtered_yaws = state["calibration_yaws"]
+                filtered_pitches = state["calibration_pitches"]
+
+            state["baseline_yaw"] = float(np.mean(filtered_yaws))
+            state["baseline_pitch"] = float(np.mean(filtered_pitches))
+            update_dynamic_thresholds(state, filtered_yaws, filtered_pitches)
+            state["smoothed_adj_yaw"] = None
+            state["smoothed_adj_pitch"] = None
+            state["is_calibrated"] = True
+
+            print(
+                f"[session={session_id}] Calibration complete - "
+                f"Baseline Yaw: {state['baseline_yaw']:.1f} Pitch: {state['baseline_pitch']:.1f}"
+            )
             return {
-                "calibrated":     True,
-                "baseline_yaw":   round(baseline_yaw,   1),
-                "baseline_pitch": round(baseline_pitch, 1),
-                "yaw_threshold":  round(dynamic_yaw_threshold, 1),
-                "pitch_threshold": round(dynamic_pitch_down, 1),
-                "message":        "Calibration complete!"
+                "session_id": session_id,
+                "calibrated": True,
+                "baseline_yaw": round(state["baseline_yaw"], 1),
+                "baseline_pitch": round(state["baseline_pitch"], 1),
+                "yaw_threshold": round(state["dynamic_yaw_threshold"], 1),
+                "pitch_threshold": round(state["dynamic_pitch_down"], 1),
+                "message": "Calibration complete!",
             }
 
         return {
+            "session_id": session_id,
             "calibrated": False,
-            "collected":  collected,
-            "needed":     CALIBRATION_COUNT,
-            "message":    f"Calibrating... {collected}/{CALIBRATION_COUNT} frames collected"
+            "collected": collected,
+            "needed": CALIBRATION_COUNT,
+            "message": f"Calibrating... {collected}/{CALIBRATION_COUNT} frames collected",
         }
 
     except Exception as e:
         import traceback
+
         print(f"Calibration error: {traceback.format_exc()}")
         return {"calibrated": False, "error": str(e)}
 
 
 @app.post("/reset-calibration")
-async def reset_calibration():
-    global calibration_yaws, calibration_pitches, baseline_yaw, baseline_pitch, is_calibrated
-    global dynamic_yaw_threshold, dynamic_pitch_down, dynamic_pitch_up
-    global smoothed_adj_yaw, smoothed_adj_pitch
-    global last_tracked_direction
-    calibration_yaws    = []
-    calibration_pitches = []
-    baseline_yaw        = 0.0
-    baseline_pitch      = 0.0
-    dynamic_yaw_threshold = BASE_YAW_THRESHOLD
-    dynamic_pitch_down = BASE_PITCH_ABS
-    dynamic_pitch_up = -BASE_PITCH_ABS
-    smoothed_adj_yaw = None
-    smoothed_adj_pitch = None
-    pose_history.clear()
-    pending_clips.clear()
-    last_tracked_direction = None
-    is_calibrated       = False
-    print("🔄 Calibration reset")
-    return {"reset": True, "message": "Calibration reset."}
+async def reset_calibration(x_session_id: str | None = Header(default=None)):
+    cleanup_inactive_sessions()
+    session_id = (x_session_id or "").strip() or "default"
+    state = init_session_state()
+    session_states[session_id] = state
+    print(f"[session={session_id}] Calibration reset")
+    return {"session_id": session_id, "reset": True, "message": "Calibration reset."}
 
 
 # ---------- STATS ENDPOINT ----------
 @app.get("/stats")
 async def get_stats():
-    """Returns violation frequency counts per type"""
-    summary = {vt: {"count": data["count"]} for vt, data in violation_stats.items()}
-    return {"stats": summary, "timestamp": datetime.now().isoformat()}
+    cleanup_inactive_sessions()
+    aggregated = {vt: {"count": 0} for vt in new_violation_stats().keys()}
+    for state in session_states.values():
+        for vt, data in state["violation_stats"].items():
+            aggregated[vt]["count"] += data["count"]
+    return {
+        "active_sessions": len(session_states),
+        "stats": aggregated,
+        "timestamp": datetime.now().isoformat(),
+    }
 
 
 # ---------- MAIN ENDPOINT ----------
 @app.post("/analyze-head-pose")
-async def analyze_head_pose(frame: UploadFile = File(...)):
-    global baseline_yaw, baseline_pitch, is_calibrated, last_tracked_direction
-    global smoothed_adj_yaw, smoothed_adj_pitch
-
+async def analyze_head_pose(
+    frame: UploadFile = File(...),
+    x_session_id: str | None = Header(default=None),
+):
     try:
+        cleanup_inactive_sessions()
+        session_id = (x_session_id or "").strip() or "default"
+        state = get_session_state(session_id)
+
+        pose_history = state["pose_history"]
+        frame_buffer = state["frame_buffer"]
+        pending_clips = state["pending_clips"]
+        violation_stats = state["violation_stats"]
+
         contents = await frame.read()
-        np_arr   = np.frombuffer(contents, np.uint8)
-        img      = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        np_arr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
         if img is None:
             return {"violation": False, "direction": "UNKNOWN", "reason": "Invalid image"}
@@ -391,173 +413,188 @@ async def analyze_head_pose(frame: UploadFile = File(...)):
         now = time.time()
 
         # ---------- AUTO-CALIBRATION ----------
-        if not is_calibrated:
+        if not state["is_calibrated"]:
             img_h, img_w = img.shape[:2]
-            frame_rgb    = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            results      = face_mesh.process(frame_rgb)
+            frame_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            results = face_mesh.process(frame_rgb)
             if results.multi_face_landmarks:
-                lms     = results.multi_face_landmarks[0].landmark
-                y, p, _ = get_head_angles(lms, img_w, img_h)
-                if y is not None and p is not None:
-                    calibration_yaws.append(y)
-                    calibration_pitches.append(p)
-                    print(f"Auto-calibrating... {len(calibration_yaws)}/{CALIBRATION_COUNT}")
-                    if len(calibration_yaws) >= CALIBRATION_COUNT:
-                        yaw_median       = float(np.median(calibration_yaws))
-                        pitch_median     = float(np.median(calibration_pitches))
-                        filtered_yaws    = [fy for fy in calibration_yaws    if abs(fy - yaw_median)   < 15]
-                        filtered_pitches = [fp for fp in calibration_pitches if abs(fp - pitch_median) < 15]
+                lms = results.multi_face_landmarks[0].landmark
+                yaw, pitch, _ = get_head_angles(lms, img_w, img_h)
+                if yaw is not None and pitch is not None:
+                    state["calibration_yaws"].append(yaw)
+                    state["calibration_pitches"].append(pitch)
+                    print(f"[session={session_id}] Auto-calibrating... {len(state['calibration_yaws'])}/{CALIBRATION_COUNT}")
+                    if len(state["calibration_yaws"]) >= CALIBRATION_COUNT:
+                        yaw_median = float(np.median(state["calibration_yaws"]))
+                        pitch_median = float(np.median(state["calibration_pitches"]))
+                        filtered_yaws = [fy for fy in state["calibration_yaws"] if abs(fy - yaw_median) < 15]
+                        filtered_pitches = [fp for fp in state["calibration_pitches"] if abs(fp - pitch_median) < 15]
                         if len(filtered_yaws) < 5:
-                            filtered_yaws    = calibration_yaws
-                            filtered_pitches = calibration_pitches
-                        baseline_yaw   = float(np.mean(filtered_yaws))
-                        baseline_pitch = float(np.mean(filtered_pitches))
-                        update_dynamic_thresholds(filtered_yaws, filtered_pitches)
-                        smoothed_adj_yaw = None
-                        smoothed_adj_pitch = None
-                        is_calibrated  = True
-                        print(f"✅ Auto-calibration done — Baseline Yaw: {baseline_yaw:.1f}° Pitch: {baseline_pitch:.1f}°")
+                            filtered_yaws = state["calibration_yaws"]
+                            filtered_pitches = state["calibration_pitches"]
+
+                        state["baseline_yaw"] = float(np.mean(filtered_yaws))
+                        state["baseline_pitch"] = float(np.mean(filtered_pitches))
+                        update_dynamic_thresholds(state, filtered_yaws, filtered_pitches)
+                        state["smoothed_adj_yaw"] = None
+                        state["smoothed_adj_pitch"] = None
+                        state["is_calibrated"] = True
+                        print(
+                            f"[session={session_id}] Auto-calibration done - "
+                            f"Baseline Yaw: {state['baseline_yaw']:.1f} Pitch: {state['baseline_pitch']:.1f}"
+                        )
 
             return {
-                "violation":  False,
-                "direction":  "CALIBRATING",
-                "calibrated": is_calibrated,
-                "collected":  len(calibration_yaws),
-                "needed":     CALIBRATION_COUNT,
-                "yaw": None, "pitch": None, "roll": None,
-                "timestamp":  datetime.now().isoformat()
+                "session_id": session_id,
+                "violation": False,
+                "direction": "CALIBRATING",
+                "calibrated": state["is_calibrated"],
+                "collected": len(state["calibration_yaws"]),
+                "needed": CALIBRATION_COUNT,
+                "yaw": None,
+                "pitch": None,
+                "roll": None,
+                "timestamp": datetime.now().isoformat(),
             }
 
         # ---------- FACE DETECTION ----------
         img_h, img_w = img.shape[:2]
-        frame_rgb    = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        results      = face_mesh.process(frame_rgb)
+        frame_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(frame_rgb)
 
         if not results.multi_face_landmarks:
             pose_history.append("NO_FACE")
             current_direction = "NO_FACE"
             yaw = pitch = roll = None
         else:
-            landmarks        = results.multi_face_landmarks[0].landmark
+            landmarks = results.multi_face_landmarks[0].landmark
             yaw, pitch, roll = get_head_angles(landmarks, img_w, img_h)
             if yaw is None:
                 return {"violation": False, "direction": "UNKNOWN", "reason": "Angle computation failed"}
-            current_direction = determine_head_direction(yaw, pitch)
+            current_direction = determine_head_direction(state, yaw, pitch)
             pose_history.append(current_direction)
 
         # ---------- PER-EVENT TRACKING ----------
-        # When direction changes: reset previous event, start new event timer
-        if last_tracked_direction != current_direction:
-            # Close previous event
-            if last_tracked_direction in DIRECTION_TO_TYPE:
-                prev_type = DIRECTION_TO_TYPE[last_tracked_direction]
+        if state["last_tracked_direction"] != current_direction:
+            if state["last_tracked_direction"] in DIRECTION_TO_TYPE:
+                prev_type = DIRECTION_TO_TYPE[state["last_tracked_direction"]]
                 violation_stats[prev_type]["active_since"] = None
-                violation_stats[prev_type]["event_fired"]  = False
+                violation_stats[prev_type]["event_fired"] = False
 
-            # Start new event timer
             if current_direction in DIRECTION_TO_TYPE:
                 vtype = DIRECTION_TO_TYPE[current_direction]
                 violation_stats[vtype]["active_since"] = now
-                violation_stats[vtype]["event_fired"]  = False
+                violation_stats[vtype]["event_fired"] = False
 
-            last_tracked_direction = current_direction
+            state["last_tracked_direction"] = current_direction
 
         # ---------- VIOLATION DETECTION ----------
-        # Fires ONCE per event when student has been looking away for 3+ seconds
-        violation      = False
+        violation = False
         violation_type = None
-        severity       = None
-        description    = None
-        video_path     = None
+        severity = None
+        description = None
+        video_path = None
         event_duration = None
 
-        if current_direction in DIRECTION_TO_TYPE and check_sustained_violation(current_direction):
-            vtype        = DIRECTION_TO_TYPE[current_direction]
+        if current_direction in DIRECTION_TO_TYPE and check_sustained_violation(current_direction, pose_history):
+            vtype = DIRECTION_TO_TYPE[current_direction]
             active_since = violation_stats[vtype]["active_since"]
-            event_fired  = violation_stats[vtype]["event_fired"]
+            event_fired = violation_stats[vtype]["event_fired"]
             last_fired_at = violation_stats[vtype]["last_fired_at"]
 
             if active_since is not None and not event_fired:
                 elapsed = now - active_since
                 cooldown_ok = (last_fired_at is None) or ((now - last_fired_at) >= EVENT_COOLDOWN_SECONDS)
                 if elapsed >= EVENT_MIN_SECONDS and cooldown_ok:
-                    violation_stats[vtype]["count"]      += 1
+                    violation_stats[vtype]["count"] += 1
                     violation_stats[vtype]["event_fired"] = True
                     violation_stats[vtype]["last_fired_at"] = now
 
-                    violation      = True
+                    violation = True
                     violation_type = vtype
                     event_duration = round(elapsed, 1)
-                    severity       = "high"   if current_direction in ["LEFT", "RIGHT", "NO_FACE"] else \
-                                     "medium" if current_direction == "DOWN" else "low"
-                    description    = (
+                    severity = (
+                        "high"
+                        if current_direction in ["LEFT", "RIGHT", "NO_FACE"]
+                        else "medium" if current_direction == "DOWN" else "low"
+                    )
+                    description = (
                         f"Student looked {current_direction} for {event_duration}s "
-                        f"— occurrence #{violation_stats[vtype]['count']}"
+                        f"- occurrence #{violation_stats[vtype]['count']}"
                     )
                     video_filename = f"{uuid.uuid4()}.mp4"
                     video_path = video_filename
 
-                    # Start collecting post-violation frames (5 more seconds)
                     clip_id = str(uuid.uuid4())
                     pending_clips[clip_id] = {
-                        "frames":        list(frame_buffer),   # pre-violation frames
-                        "filename":      video_filename,
-                        "collect_until": now + POST_VIOLATION_SECONDS,  # collect for post window
-                        "vtype":         vtype,
+                        "frames": list(frame_buffer),
+                        "filename": video_filename,
+                        "collect_until": now + POST_VIOLATION_SECONDS,
+                        "vtype": vtype,
                     }
 
         # ---------- COLLECT POST-VIOLATION FRAMES ----------
-        # Add current frame to any pending clips still within their collection window
         completed_clips = []
         for clip_id, clip in pending_clips.items():
-            clip["frames"].append(img.copy() if img is not None else frame_buffer[-1])
+            clip["frames"].append(img.copy())
             if now >= clip["collect_until"]:
                 completed_clips.append(clip_id)
 
-        # Save completed clips (post-violation window expired)
         for clip_id in completed_clips:
             clip_data = pending_clips.pop(clip_id)
-            clip_frames = clip_data["frames"]
-            clip_filename = clip_data["filename"]
-            loop = asyncio.get_event_loop()
-            loop.run_in_executor(executor, save_violation_video, clip_frames, clip_filename)
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(executor, save_violation_video, clip_data["frames"], clip_data["filename"])
 
         # ---------- STATS ----------
         stats_summary = {vt: {"count": data["count"]} for vt, data in violation_stats.items()}
 
         # ---------- LOGS ----------
-        print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         if yaw is not None:
-            print(f"Yaw: {yaw:.1f}° (adj: {yaw-baseline_yaw:.1f}°)  Pitch: {pitch:.1f}° (adj: {pitch-baseline_pitch:.1f}°)")
-        print(f"Direction: {current_direction} | History: {list(pose_history)}")
+            print(
+                f"Yaw: {yaw:.1f} (adj: {yaw - state['baseline_yaw']:.1f})  "
+                f"Pitch: {pitch:.1f} (adj: {pitch - state['baseline_pitch']:.1f})"
+            )
+        print(f"[session={session_id}] Direction: {current_direction} | History: {list(pose_history)}")
         if violation:
-            print(f"🚨 Violation: {violation_type} | Duration: {event_duration}s | Count: {violation_stats[violation_type]['count']}")
+            print(
+                f"Violation: {violation_type} | Duration: {event_duration}s | "
+                f"Count: {violation_stats[violation_type]['count']}"
+            )
         active_counts = {vt: d["count"] for vt, d in violation_stats.items() if d["count"] > 0}
         if active_counts:
             print(f"Counts: {active_counts}")
-        print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         return {
-            "violation":      violation,
-            "type":           violation_type,
-            "severity":       severity,
-            "description":    description,
-            "direction":      current_direction,
-            "event_duration": event_duration,   # duration of THIS event only (not cumulative)
-            "calibrated":     is_calibrated,
-            "yaw":            round(yaw,   1) if yaw   is not None else None,
-            "pitch":          round(pitch, 1) if pitch is not None else None,
-            "roll":           round(roll,  1) if roll  is not None else None,
-            "adj_yaw":        round(yaw   - baseline_yaw,   1) if yaw   is not None else None,
-            "adj_pitch":      round(pitch - baseline_pitch, 1) if pitch is not None else None,
-            "yaw_threshold":  round(dynamic_yaw_threshold, 1),
-            "pitch_threshold": round(dynamic_pitch_down, 1),
-            "video_path":     video_path,
-            "stats":          stats_summary,
-            "timestamp":      datetime.now().isoformat()
+            "session_id": session_id,
+            "violation": violation,
+            "type": violation_type,
+            "severity": severity,
+            "description": description,
+            "direction": current_direction,
+            "event_duration": event_duration,
+            "calibrated": state["is_calibrated"],
+            "yaw": round(yaw, 1) if yaw is not None else None,
+            "pitch": round(pitch, 1) if pitch is not None else None,
+            "roll": round(roll, 1) if roll is not None else None,
+            "adj_yaw": round(yaw - state["baseline_yaw"], 1) if yaw is not None else None,
+            "adj_pitch": round(pitch - state["baseline_pitch"], 1) if pitch is not None else None,
+            "yaw_threshold": round(state["dynamic_yaw_threshold"], 1),
+            "pitch_threshold": round(state["dynamic_pitch_down"], 1),
+            "video_path": video_path,
+            "stats": stats_summary,
+            "timestamp": datetime.now().isoformat(),
         }
 
     except Exception as e:
         import traceback
+
         print(f"Head pose error: {traceback.format_exc()}")
         return {"violation": False, "direction": "UNKNOWN", "error": str(e)}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("HeadPoseService:app", host="0.0.0.0", port=8004, reload=True)

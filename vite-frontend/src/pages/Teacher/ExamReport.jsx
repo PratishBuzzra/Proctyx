@@ -59,8 +59,10 @@ const ExamReport = () => {
   const getVideoUrl = (violation) => {
     const filename = getVideoFilename(violation.videoPath);
     if (!filename) return null;
-    const isHeadViolation = violation.type?.startsWith("HEAD_");
-    const port = isHeadViolation ? 8004 : 8003;
+    const type = violation.type || "";
+    let port = 8003; // gaze default
+    if (type.startsWith("HEAD_")) port = 8004;
+    if (type.startsWith("OBJECT_")) port = 8005;
     return `http://localhost:${port}/videos/${filename}`;
   };
 

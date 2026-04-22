@@ -3,6 +3,8 @@ import axios from "axios";
 import FormData from "form-data";
 import prisma from "../DB/prisma.js";
 
+const FACE_VERIFY_TIMEOUT_MS = parseInt(process.env.FACE_VERIFY_TIMEOUT_MS || "45000", 10);
+
 export const verifyFaceAI = async (req, res) => {
   const { student_id, name, email } = req.body;
   console.log("Files received:", req.files);
@@ -53,9 +55,9 @@ export const verifyFaceAI = async (req, res) => {
     console.log("Sending images to Python AI service...");
 
     const aiResponse = await axios.post(
-      "http://localhost:8001/verify-face",
+      "http://localhost:8001/verify-face-v2",
       formData,
-      { headers: formData.getHeaders(), timeout: 15000 }
+      { headers: formData.getHeaders(), timeout: FACE_VERIFY_TIMEOUT_MS }
     );
 
   req.files.forEach((file) => fs.unlink(file.path, () => {}));
@@ -90,7 +92,7 @@ return res.json({
       console.error("AI service timeout");
       return res.status(503).json({
         verified: false,
-        message: "Face verification timed out. Please hold still and try again."
+        message: "Face verification timed out. Please try again in a moment."
       });
     }
 

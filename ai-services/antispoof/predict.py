@@ -3,6 +3,7 @@ import numpy as np
 import os
 from torchvision import transforms
 from antispoof.model import AntiSpoofNet
+from PIL import Image
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 REAL_THRESHOLD = 0.40
@@ -16,8 +17,8 @@ model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
 model.eval()
 
 transform = transforms.Compose([
-    transforms.ToTensor(),
     transforms.Resize((128, 128)),
+    transforms.ToTensor(),
     transforms.Normalize(mean=[0.5]*3, std=[0.5]*3)
 ])
 
@@ -30,7 +31,9 @@ def predict_antispoof(face_img: np.ndarray):
 
     # ❌ DO NOT convert color (already RGB from face_recognition)
     img = face_img.copy()
+    img = Image.fromarray(img)
     img = transform(img).unsqueeze(0).to(DEVICE)
+
 
     # Run 3 times and average to reduce random bad predictions
     scores = []

@@ -16,7 +16,7 @@ const Navbar = () => {
            <NavLink to="/about" className="nav-link">About</NavLink>
             <NavLink to="/howitworks" className="nav-link">How It Works</NavLink>
              <NavLink to="/exam-rules" className="nav-link">Exam Rules</NavLink>
-              <NavLink to="/contact" className="nav-link">Contact</NavLink>
+              
         </div>
        <div className='flex gap-4'>
            <Link to="/join-exam" className="py-2 text-green-600 font-medium  cursor-pointer">

@@ -1,18 +1,15 @@
 import React from "react";
-import Navbar from "./components/StaticComponets/Navbar/Navbar";
 import { Route, Routes } from "react-router-dom";
 
 import Register from "./pages/Register/Register";
-
 import Login from "./pages/Login/Login";
-
 import Home from "./pages/Home";
-
 import Aboutus from "./pages/Aboutus";
 import HowItWorks from "./pages/HowItWorks";
 import ExamSystemCheck from "./pages/Exam/ExamSystemCheck";
 import Exam from "./pages/Exam/Exam";
 import ExamRules from "./pages/Exam/ExamRules";
+import PublicExamRules from "./pages/ExamRules";
 import StudentVerify from "./pages/Exam/StudentVerify";
 import TeacherDashboard from "./pages/Teacher/TeacherDashboard";
 import { ToastContainer } from "react-toastify";
@@ -41,28 +38,27 @@ const App = () => {
         <Route path="/about" element={<Aboutus />} />
         <Route path="/register" element={<Register />} />
         <Route path="/howitworks" element={<HowItWorks />} />
+        <Route path="/exam-rules" element={<PublicExamRules />} />
         <Route path="/login" element={<Login />} />
         <Route path="/join-exam" element={<JoinExam />} />
         <Route path="/result/:examId/:studentId" element={<Result />} />
-      
+
         <Route
           path="/studentverify/:examId"
           element={
             <ProtectedExamRoute>
-              {" "}
-              <StudentVerify />{" "}
+              <StudentVerify />
             </ProtectedExamRoute>
           }
-        />{" "}
+        />
         <Route
           path="/systemcheck/:examId"
           element={
             <ProtectedExamRoute requireVerification={true}>
-              {" "}
-              <ExamSystemCheck />{" "}
+              <ExamSystemCheck />
             </ProtectedExamRoute>
           }
-        />{" "}
+        />
         <Route
           path="/rules/:examId"
           element={
@@ -70,11 +66,10 @@ const App = () => {
               requireVerification={true}
               requireSystemCheck={true}
             >
-              {" "}
-              <ExamRules />{" "}
+              <ExamRules />
             </ProtectedExamRoute>
           }
-        />{" "}
+        />
         <Route
           path="/exam/:examId"
           element={
@@ -83,8 +78,7 @@ const App = () => {
               requireSystemCheck={true}
               requireRulesAcceptance={true}
             >
-              {" "}
-              <Exam />{" "}
+              <Exam />
             </ProtectedExamRoute>
           }
         />
@@ -113,13 +107,13 @@ const App = () => {
           }
         />
         <Route
-  path="/exam/:examId/report"
-  element={
-    <TeacherProtected>
-      <ExamReport />
-    </TeacherProtected>
-  }
-/>
+          path="/exam/:examId/report"
+          element={
+            <TeacherProtected>
+              <ExamReport />
+            </TeacherProtected>
+          }
+        />
       </Routes>
     </div>
   );

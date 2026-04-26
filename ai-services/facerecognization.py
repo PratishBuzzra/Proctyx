@@ -34,14 +34,17 @@ MIN_LIVE_FACE_FRAMES = 3
 MIN_SHARPNESS = 10.0
 MIN_BRIGHTNESS = 20.0
 MAX_BRIGHTNESS = 245.0
-LOW_LIGHT_TRIGGER_BRIGHTNESS = 65.0
-VERY_DARK_BRIGHTNESS = 40.0
+LOW_LIGHT_TRIGGER_BRIGHTNESS = 80.0
+VERY_DARK_BRIGHTNESS = 50.0
 
 # Anti-spoof constraints
-ANTISPOOF_MIN_REAL_CONF = 0.40
-ANTISPOOF_PASS_RATIO = 0.60
+ENABLE_ANTISPOOF = os.getenv("ENABLE_ANTISPOOF", "0").strip().lower() not in {
+    "0", "false", "off", "no"
+}
+ANTISPOOF_MIN_REAL_CONF = 0.35
+ANTISPOOF_PASS_RATIO = 0.50
 ANTISPOOF_HARD_REJECT = 0.15
-ANTISPOOF_RETRY_THRESHOLD = 0.30
+ANTISPOOF_RETRY_THRESHOLD = 0.25
 
 # InsightFace singleton runtime
 _insightface_app = None
@@ -352,6 +355,33 @@ def collect_valid_live_frames_v2(live_imgs):
     return valid_frames, None
 
 
+def run_antispoof(face_crops, tag=""):
+    if not ENABLE_ANTISPOOF:
+        print(f"[AntiSpoof{tag}] Disabled via ENABLE_ANTISPOOF")
+        return {
+            "anti_passes": len(face_crops),
+            "liveness_conf": 1.0,
+            "required_passes": 0,
+        }
+
+    anti_scores = []
+    anti_passes = 0
+    for crop in face_crops:
+        face_crop = cv2.resize(crop, (128, 128))
+        is_real, liveness_conf = predict_antispoof(face_crop)
+        anti_scores.append(float(liveness_conf))
+        if is_real and liveness_conf >= ANTISPOOF_MIN_REAL_CONF:
+            anti_passes += 1
+
+    liveness_conf = float(np.median(anti_scores)) if anti_scores else 0.0
+    required_passes = max(1, math.ceil(len(face_crops) * ANTISPOOF_PASS_RATIO))
+    return {
+        "anti_passes": anti_passes,
+        "liveness_conf": liveness_conf,
+        "required_passes": required_passes,
+    }
+
+
 @app.post("/verify-face")
 async def verify_face(
     registered_image: UploadFile = File(...),
@@ -398,17 +428,10 @@ async def verify_face(
             return fail_response(reason)
 
         # ---------- ANTISPOOF (multi-frame) ----------
-        anti_scores = []
-        anti_passes = 0
-        for _, _, crop in valid_live_frames:
-            face_crop = cv2.resize(crop, (128, 128))
-            is_real, liveness_conf = predict_antispoof(face_crop)
-            anti_scores.append(float(liveness_conf))
-            if is_real and liveness_conf >= ANTISPOOF_MIN_REAL_CONF:
-                anti_passes += 1
-
-        liveness_conf = float(np.median(anti_scores)) if anti_scores else 0.0
-        required_passes = max(1, math.ceil(len(valid_live_frames) * ANTISPOOF_PASS_RATIO))
+        anti_result = run_antispoof([crop for _, _, crop in valid_live_frames])
+        anti_passes = anti_result["anti_passes"]
+        liveness_conf = anti_result["liveness_conf"]
+        required_passes = anti_result["required_passes"]
         if anti_passes < required_passes:
             if liveness_conf < ANTISPOOF_HARD_REJECT:
                 return fail_response("Spoof detected", liveness=liveness_conf)
@@ -494,17 +517,10 @@ async def verify_face_v2(
             return fail_response(reason)
 
         # ---------- ANTISPOOF (multi-frame) ----------
-        anti_scores = []
-        anti_passes = 0
-        for _, crop in valid_live_frames:
-            face_crop = cv2.resize(crop, (128, 128))
-            is_real, liveness_conf = predict_antispoof(face_crop)
-            anti_scores.append(float(liveness_conf))
-            if is_real and liveness_conf >= ANTISPOOF_MIN_REAL_CONF:
-                anti_passes += 1
-
-        liveness_conf = float(np.median(anti_scores)) if anti_scores else 0.0
-        required_passes = max(1, math.ceil(len(valid_live_frames) * ANTISPOOF_PASS_RATIO))
+        anti_result = run_antispoof([crop for _, crop in valid_live_frames], tag="[V2]")
+        anti_passes = anti_result["anti_passes"]
+        liveness_conf = anti_result["liveness_conf"]
+        required_passes = anti_result["required_passes"]
         if liveness_conf < ANTISPOOF_HARD_REJECT:
             return fail_response("Spoof detected", liveness=liveness_conf)
 

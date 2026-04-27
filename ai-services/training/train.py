@@ -31,6 +31,7 @@ def resolve_dataset_root() -> str:
     env_root = os.getenv("ANTISPOOF_DATASET_ROOT")
     candidates = [
         env_root,
+        os.path.join(os.path.expanduser("~"), "Desktop", "liveness_dataset"),
         os.path.join(os.path.expanduser("~"), "Desktop", "liveness detection.coco"),
         os.path.join(ROOT_DIR, "training", "dataset_flat"),
         os.path.join(ROOT_DIR, "training", "dataset"),
@@ -158,9 +159,9 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
 
 
 # ---------- TRAINING LOOP ----------
-EPOCHS = int(os.getenv("ANTISPOOF_EPOCHS", "30"))
+EPOCHS = int(os.getenv("ANTISPOOF_EPOCHS", "25"))
 best_val_acc = 0.0
-patience = 7
+patience = 5
 no_improve = 0
 
 for epoch in range(EPOCHS):
@@ -229,3 +230,5 @@ if test_loader:
 
 print(f"\nTraining complete! Best Val Acc: {best_val_acc:.3f}")
 print(f"Weights saved to: {WEIGHTS_PATH}")
+
+

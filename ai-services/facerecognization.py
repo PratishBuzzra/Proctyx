@@ -38,7 +38,7 @@ LOW_LIGHT_TRIGGER_BRIGHTNESS = 80.0
 VERY_DARK_BRIGHTNESS = 50.0
 
 # Anti-spoof constraints
-ENABLE_ANTISPOOF = os.getenv("ENABLE_ANTISPOOF", "0").strip().lower() not in {
+ENABLE_ANTISPOOF = os.getenv("ENABLE_ANTISPOOF", "1").strip().lower() not in {
     "0", "false", "off", "no"
 }
 ANTISPOOF_MIN_REAL_CONF = 0.35

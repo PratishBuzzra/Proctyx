@@ -19,6 +19,26 @@ const CreateExam = () => {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
+  const validateForm = () => {
+    const duration = parseInt(formData.durationMinutes, 10);
+    const start = new Date(formData.startTime);
+    const end = new Date(formData.endTime);
+
+    if (!formData.title.trim() || !formData.description.trim()) {
+      return "Title and description are required";
+    }
+    if (!Number.isInteger(duration) || duration <= 0) {
+      return "Duration must be a positive number";
+    }
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      return "Start time and end time are required";
+    }
+    if (start >= end) {
+      return "End time must be later than start time";
+    }
+    return null;
+  };
+
   const handleChange = (e) => {
     const { name, value } = e.target;
 
@@ -33,6 +53,12 @@ const CreateExam = () => {
 
     setError("");
     setMessage("");
+
+    const validationError = validateForm();
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
 
     try {
       const res = await fetch(`${base_url}/exam/createexam`, {

@@ -1,6 +1,33 @@
 import prisma from "../DB/prisma.js";
 import { generateExamKey } from "../utils/generatekey.js";
 
+function parseDate(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function validateExamSchedule({ title, description, durationMinutes, startTime, endTime }) {
+  if (!title || !description) {
+    return "Title and description are required";
+  }
+
+  if (!Number.isInteger(durationMinutes) || durationMinutes <= 0) {
+    return "Duration must be a positive number of minutes";
+  }
+
+  const start = parseDate(startTime);
+  const end = parseDate(endTime);
+
+  if (!start || !end) {
+    return "Start time and end time are required";
+  }
+
+  if (start >= end) {
+    return "End time must be later than start time";
+  }
+
+  return null;
+}
 
 
 
@@ -14,6 +41,18 @@ export const createExam = async (req, res) => {
       endTime,
       teacherId
     } = req.body;
+
+    const validationError = validateExamSchedule({
+      title,
+      description,
+      durationMinutes,
+      startTime,
+      endTime
+    });
+
+    if (validationError) {
+      return res.status(400).json({ message: validationError });
+    }
 
     const examKey = generateExamKey();
     
@@ -71,6 +110,18 @@ export const updateExam = async (req, res) => {
       startTime,
       endTime
     } = req.body;
+
+    const validationError = validateExamSchedule({
+      title,
+      description,
+      durationMinutes,
+      startTime,
+      endTime
+    });
+
+    if (validationError) {
+      return res.status(400).json({ message: validationError });
+    }
 
     // 1️⃣ Check if exam exists and belongs to this teacher
     const exam = await prisma.exam.findUnique({

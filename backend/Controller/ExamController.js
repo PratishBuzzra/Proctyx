@@ -6,27 +6,34 @@ function parseDate(value) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-function validateExamSchedule({ title, description, durationMinutes, startTime, endTime }) {
+function getScheduleParts({ title, description, startTime, endTime }) {
   if (!title || !description) {
-    return "Title and description are required";
-  }
-
-  if (!Number.isInteger(durationMinutes) || durationMinutes <= 0) {
-    return "Duration must be a positive number of minutes";
+    return { error: "Title and description are required" };
   }
 
   const start = parseDate(startTime);
   const end = parseDate(endTime);
+  const now = new Date();
+  now.setSeconds(0, 0);
 
   if (!start || !end) {
-    return "Start time and end time are required";
+    return { error: "Start time and end time are required" };
+  }
+
+  if (start < now) {
+    return { error: "Start time cannot be in the past" };
   }
 
   if (start >= end) {
-    return "End time must be later than start time";
+    return { error: "End time must be later than start time" };
   }
 
-  return null;
+  const durationMinutes = Math.round((end.getTime() - start.getTime()) / 60000);
+  if (!Number.isInteger(durationMinutes) || durationMinutes <= 0) {
+    return { error: "Duration must be at least 1 minute" };
+  }
+
+  return { start, end, durationMinutes };
 }
 
 
@@ -36,22 +43,20 @@ export const createExam = async (req, res) => {
     const {
       title,
       description,
-      durationMinutes,
       startTime,
       endTime,
       teacherId
     } = req.body;
 
-    const validationError = validateExamSchedule({
+    const schedule = getScheduleParts({
       title,
       description,
-      durationMinutes,
       startTime,
       endTime
     });
 
-    if (validationError) {
-      return res.status(400).json({ message: validationError });
+    if (schedule.error) {
+      return res.status(400).json({ message: schedule.error });
     }
 
     const examKey = generateExamKey();
@@ -61,10 +66,10 @@ export const createExam = async (req, res) => {
       data: {
         title,
         description,
-        durationMinutes,
+        durationMinutes: schedule.durationMinutes,
         examKey,
-        startTime: new Date(startTime),
-        endTime: new Date(endTime),
+        startTime: schedule.start,
+        endTime: schedule.end,
         createdBy: req.teacher.id
       }
     });
@@ -106,21 +111,19 @@ export const updateExam = async (req, res) => {
     const {
       title,
       description,
-      durationMinutes,
       startTime,
       endTime
     } = req.body;
 
-    const validationError = validateExamSchedule({
+    const schedule = getScheduleParts({
       title,
       description,
-      durationMinutes,
       startTime,
       endTime
     });
 
-    if (validationError) {
-      return res.status(400).json({ message: validationError });
+    if (schedule.error) {
+      return res.status(400).json({ message: schedule.error });
     }
 
     // 1️⃣ Check if exam exists and belongs to this teacher
@@ -142,9 +145,9 @@ export const updateExam = async (req, res) => {
       data: {
         title,
         description,
-        durationMinutes,
-        startTime: new Date(startTime),
-        endTime: new Date(endTime)
+        durationMinutes: schedule.durationMinutes,
+        startTime: schedule.start,
+        endTime: schedule.end
       }
     });
 

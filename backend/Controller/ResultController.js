@@ -7,11 +7,26 @@ export const submitExam = async (req, res) => {
   // answers = [{ questionId, selectedAnswer }, ...]
   console.log("Received:", req.body);
 
-  if (!examId || !studentId || !answers || !answers.length) {
+  if (!examId || !studentId || !Array.isArray(answers)) {
     return res.status(400).json({ message: "Missing required fields" });
   }
 
   try {
+    const exam = await prisma.exam.findUnique({
+      where: { id: parseInt(examId) },
+      select: { id: true, endTime: true, startTime: true }
+    });
+
+    if (!exam) {
+      return res.status(404).json({ message: "Exam not found" });
+    }
+
+    const now = new Date();
+    const gracePeriodMs = 30 * 1000;
+    if (now.getTime() > new Date(exam.endTime).getTime() + gracePeriodMs) {
+      return res.status(400).json({ message: "Exam time has ended" });
+    }
+
     // Check if already submitted
     const existing = await prisma.examResult.findFirst({
       where: {

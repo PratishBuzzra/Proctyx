@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import WebcamMonitor from "../../components/WebcamMonitor";
 import useExamGuard from "../../hooks/useExamGuard";
@@ -13,7 +13,7 @@ const base_url = import.meta.env.VITE_API_URL;
 function Exam() {
   const { examId } = useParams();
   const navigate = useNavigate();
-  const { studentId, selectedDeviceId } = useExam();
+  const { studentId, selectedDeviceId, endTime, durationMinutes } = useExam();
 
   const [questions, setQuestions] = useState([]);
   const [examActive, setExamActive] = useState(true);
@@ -21,12 +21,30 @@ function Exam() {
   const [answers, setAnswers] = useState({}); // { questionId: selectedAnswer }
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [remainingSeconds, setRemainingSeconds] = useState(0);
+  const [timeUp, setTimeUp] = useState(false);
+  const autoSubmittedRef = useRef(false);
+  const submitExamRef = useRef(null);
 
   /* guards */
   useExamGuard(examId, studentId);
   const { isFullscreen, requestFullscreen } = useFullscreenGuard();
   const { uploadRecording } = useProctoringRecorder(examActive, examId, studentId, selectedDeviceId);
   useAudioMonitor(examActive, examId, studentId);
+
+  const examDeadline = useMemo(() => {
+    if (endTime) {
+      const parsed = new Date(endTime);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    if (durationMinutes && durationMinutes > 0) {
+      const start = new Date();
+      return new Date(start.getTime() + durationMinutes * 60000);
+    }
+
+    return null;
+  }, [endTime, durationMinutes]);
 
   useEffect(() => {
     const fetchQuestions = async () => {
@@ -57,6 +75,26 @@ function Exam() {
     fetchQuestions();
   }, [examId]);
 
+  useEffect(() => {
+    if (!examDeadline) return undefined;
+
+    const updateTimer = () => {
+      const diff = Math.max(0, Math.floor((examDeadline.getTime() - Date.now()) / 1000));
+      setRemainingSeconds(diff);
+
+      if (diff <= 0 && !autoSubmittedRef.current) {
+        autoSubmittedRef.current = true;
+        setTimeUp(true);
+        setTimeout(() => submitExamRef.current?.(true), 0);
+      }
+    };
+
+    updateTimer();
+    const timerId = setInterval(updateTimer, 1000);
+
+    return () => clearInterval(timerId);
+  }, [examDeadline]);
+
   const handleSelect = (option) => {
     setAnswers((prev) => ({
       ...prev,
@@ -72,12 +110,18 @@ function Exam() {
     setCurrent((prev) => prev + 1);
   };
 
-  const handleSubmit = async () => {
-    if (!answers[questions[current].id]) {
+  const handleSubmit = async (force = false) => {
+    if (!force && !answers[questions[current].id]) {
       toast("Please select an answer");
       return;
     }
 
+    if (submitting) return;
+
+    autoSubmittedRef.current = true;
+    if (force) {
+      setTimeUp(true);
+    }
     setSubmitting(true);
     setExamActive(false);
     try {
@@ -125,6 +169,10 @@ function Exam() {
     }
   };
 
+  useEffect(() => {
+    submitExamRef.current = handleSubmit;
+  }, [handleSubmit]);
+
   if (loading) return <h2 className="p-6">Loading questions...</h2>;
   if (!questions.length)
     return <h2 className="p-6">No questions available for this exam</h2>;
@@ -132,6 +180,8 @@ function Exam() {
   const currentQuestion = questions[current];
   const selectedAnswer = answers[currentQuestion.id];
   const isLastQuestion = current === questions.length - 1;
+  const minutes = Math.floor(remainingSeconds / 60);
+  const seconds = remainingSeconds % 60;
 
   return (
     <>
@@ -151,6 +201,17 @@ function Exam() {
 
       <div className="min-h-screen flex items-center justify-center bg-gray-100">
         <div className="bg-white p-8 rounded-lg shadow-xl w-full max-w-md">
+          <div className="mb-4 rounded bg-red-50 px-4 py-3 text-center text-red-700">
+            <span className="font-semibold">Time Left:</span>{" "}
+            {String(minutes).padStart(2, "0")}:{String(seconds).padStart(2, "0")}
+          </div>
+
+          {timeUp && submitting && (
+            <div className="mb-4 rounded bg-yellow-50 px-4 py-3 text-center text-yellow-800 font-medium">
+              Time&apos;s up, submitting...
+            </div>
+          )}
+
           <h2 className="mb-4 font-bold">
             Question {current + 1} / {questions.length}
           </h2>
@@ -189,7 +250,7 @@ function Exam() {
               </button>
             ) : (
               <button
-                onClick={handleSubmit}
+                onClick={() => handleSubmit(false)}
                 disabled={submitting}
                 className="ml-auto bg-green-600 text-white px-4 py-2 rounded disabled:opacity-50"
               >

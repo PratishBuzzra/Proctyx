@@ -134,6 +134,9 @@ export const joinExam = async (req, res) => {
 
     return res.json({
       examId: exam.id,
+      startTime: exam.startTime,
+      endTime: exam.endTime,
+      durationMinutes: exam.durationMinutes,
       accessToken, // Send this to frontend
       message: "Successfully joined exam"
     });

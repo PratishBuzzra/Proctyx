@@ -30,7 +30,13 @@ const { updateExamState } = useExam();
         alert(data.message);
         return;
       }
-      updateExamState({        examId: data.examId,        accessToken: data.accessToken      });
+      updateExamState({
+        examId: data.examId,
+        accessToken: data.accessToken,
+        startTime: data.startTime,
+        endTime: data.endTime,
+        durationMinutes: data.durationMinutes,
+      });
       // Navigate to student verification page with examId
       navigate(`/studentverify/${data.examId}`);
     } catch (error) {

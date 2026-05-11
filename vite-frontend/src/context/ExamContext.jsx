@@ -20,6 +20,9 @@ export function ExamProvider({ children }) {
     return stored || {
       examId: null,
       accessToken: null,
+      startTime: null,
+      endTime: null,
+      durationMinutes: null,
       verified: false,
       systemChecked: false,
       rulesAccepted: false,
@@ -38,6 +41,9 @@ export function ExamProvider({ children }) {
     const clearedState = {
       examId: null,
       accessToken: null,
+      startTime: null,
+      endTime: null,
+      durationMinutes: null,
       verified: false,
       systemChecked: false,
       rulesAccepted: false

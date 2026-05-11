@@ -11,10 +11,32 @@ const EditExamModal = ({ exam, onClose, onUpdate }) => {
     endTime: ""
   });
 
+  const toDatetimeLocalMin = (date = new Date()) => {
+    const value = new Date(date);
+    value.setSeconds(0, 0);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}T${pad(value.getHours())}:${pad(value.getMinutes())}`;
+  };
+
+  const computeDurationMinutes = (startValue, endValue) => {
+    const start = new Date(startValue);
+    const end = new Date(endValue);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return "";
+    const diff = Math.round((end.getTime() - start.getTime()) / 60000);
+    return diff > 0 ? diff : "";
+  };
+
+  const syncDuration = (nextFormData) => ({
+    ...nextFormData,
+    durationMinutes: computeDurationMinutes(nextFormData.startTime, nextFormData.endTime),
+  });
+
   const validateForm = () => {
     const duration = parseInt(formData.durationMinutes, 10);
     const start = new Date(formData.startTime);
     const end = new Date(formData.endTime);
+    const now = new Date();
+    now.setSeconds(0, 0);
 
     if (!formData.title.trim() || !formData.description.trim()) {
       return "Title and description are required";
@@ -25,6 +47,9 @@ const EditExamModal = ({ exam, onClose, onUpdate }) => {
     if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
       return "Start time and end time are required";
     }
+    if (start < now) {
+      return "Start time cannot be in the past";
+    }
     if (start >= end) {
       return "End time must be later than start time";
     }
@@ -33,18 +58,22 @@ const EditExamModal = ({ exam, onClose, onUpdate }) => {
 
   useEffect(() => {
     if (exam) {
-      setFormData({
+      const next = {
         title: exam.title,
         description: exam.description || "",
-        durationMinutes: exam.durationMinutes,
         startTime: exam.startTime.slice(0, 16),
         endTime: exam.endTime.slice(0, 16)
-      });
+      };
+      setFormData(syncDuration({ ...next, durationMinutes: exam.durationMinutes }));
     }
   }, [exam]);
 
   const handleChange = (e) => {
-    setFormData({ ...formData, [e.target.name]: e.target.value });
+    const { name, value } = e.target;
+    setFormData((prev) => {
+      const next = { ...prev, [name]: value };
+      return syncDuration(next);
+    });
   };
 
   const handleSubmit = async () => {
@@ -101,15 +130,20 @@ const EditExamModal = ({ exam, onClose, onUpdate }) => {
           type="number"
           name="durationMinutes"
           value={formData.durationMinutes}
-          onChange={handleChange}
+          readOnly
           className="w-full border p-2 rounded mb-3"
+          placeholder="Auto-calculated from start and end time"
         />
+        <p className="text-xs text-gray-500 mb-3">
+          Automatically calculated from the selected start and end time.
+        </p>
 
         <input
           type="datetime-local"
           name="startTime"
           value={formData.startTime}
           onChange={handleChange}
+          min={toDatetimeLocalMin()}
           className="w-full border p-2 rounded mb-3"
         />
 
@@ -118,6 +152,7 @@ const EditExamModal = ({ exam, onClose, onUpdate }) => {
           name="endTime"
           value={formData.endTime}
           onChange={handleChange}
+          min={formData.startTime || toDatetimeLocalMin()}
           className="w-full border p-2 rounded mb-4"
         />
 

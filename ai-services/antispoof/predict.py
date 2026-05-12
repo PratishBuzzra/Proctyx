@@ -6,7 +6,7 @@ from antispoof.model import AntiSpoofNet
 from PIL import Image
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-REAL_THRESHOLD = 0.35
+REAL_THRESHOLD = 0.40
 
 MODEL_PATH = os.path.join(
     os.path.dirname(__file__), "..", "weights", "antispoof_weights.pth"

@@ -105,6 +105,76 @@ return res.json({
   }
 };
 
+export const monitorFaceDuringExam = async (req, res) => {
+  const { studentId, examId } = req.body;
+
+  if (!studentId || !examId || !req.file) {
+    if (req.file?.path) fs.unlink(req.file.path, () => {});
+    return res.status(400).json({
+      violation: false,
+      matched: false,
+      message: "Student ID, exam ID and live photo are required"
+    });
+  }
+
+  try {
+    const student = await prisma.student.findUnique({
+      where: { student_id: studentId }
+    });
+
+    if (!student) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(404).json({
+        violation: true,
+        matched: false,
+        message: "Student not found"
+      });
+    }
+
+    const formData = new FormData();
+    formData.append("registered_image", fs.createReadStream(student.photoupload));
+    formData.append("live_image", fs.createReadStream(req.file.path));
+
+    const aiResponse = await axios.post(
+      "http://localhost:8001/monitor-face-match",
+      formData,
+      { headers: formData.getHeaders(), timeout: FACE_VERIFY_TIMEOUT_MS }
+    );
+
+    const { matched, critical, distance, similarity, match_level, reason, confidence, liveness, ignored } = aiResponse.data;
+
+    return res.json({
+      violation: Boolean(critical),
+      matched,
+      critical: Boolean(critical),
+      ignored: Boolean(ignored),
+      distance,
+      similarity,
+      match_level,
+      confidence,
+      liveness,
+      reason: matched ? null : reason || "Face mismatch detected during exam"
+    });
+  } catch (error) {
+    if (error.code === "ECONNABORTED") {
+      return res.status(503).json({
+        violation: false,
+        matched: false,
+        message: "Face monitoring timed out"
+      });
+    }
+
+    console.error("Face monitoring error:", error.message);
+    return res.status(503).json({
+      violation: false,
+      matched: false,
+      message: "Face monitoring service unavailable"
+    });
+  } finally {
+    if (req.file?.path) fs.unlink(req.file.path, () => {});
+  }
+};
+
 // Controller/StudentExamController.js - Update joinExam
 export const joinExam = async (req, res) => {
   const { examKey } = req.body;

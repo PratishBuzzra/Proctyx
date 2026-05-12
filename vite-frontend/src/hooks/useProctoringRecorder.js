@@ -6,7 +6,10 @@ const useProctoringRecorder = (active, examId, studentId, deviceId = null) => {
   const mediaRecorderRef = useRef(null);
   const streamRef = useRef(null);
   const chunksRef = useRef([]);
+  const recentChunksRef = useRef([]);
   const uploadedPathRef = useRef(null);
+  const clipUploadedPathRef = useRef(null);
+  const recordingStartedAtRef = useRef(null);
 
   const stopRecorder = () =>
     new Promise((resolve) => {
@@ -33,7 +36,10 @@ const useProctoringRecorder = (active, examId, studentId, deviceId = null) => {
         const videoConstraint = deviceId ? { deviceId: { exact: deviceId } } : true;
 
         chunksRef.current = [];
+        recentChunksRef.current = [];
         uploadedPathRef.current = null;
+        clipUploadedPathRef.current = null;
+        recordingStartedAtRef.current = Date.now();
 
         streamRef.current = await navigator.mediaDevices.getUserMedia({
           video: videoConstraint,
@@ -47,10 +53,14 @@ const useProctoringRecorder = (active, examId, studentId, deviceId = null) => {
         mediaRecorderRef.current.ondataavailable = (e) => {
           if (e.data.size > 0) {
             chunksRef.current.push(e.data);
+            recentChunksRef.current.push(e.data);
+            if (recentChunksRef.current.length > 8) {
+              recentChunksRef.current.shift();
+            }
           }
         };
 
-        mediaRecorderRef.current.start(5000);
+        mediaRecorderRef.current.start(1000);
         console.log(
           "Proctoring recording started",
           deviceId ? `(device: ${deviceId.slice(0, 8)}...)` : "(default cam)"
@@ -116,10 +126,47 @@ const useProctoringRecorder = (active, examId, studentId, deviceId = null) => {
     }
 
     chunksRef.current = [];
+    recentChunksRef.current = [];
     return recordingPath;
   };
 
-  return { uploadRecording };
+  const uploadRecentClip = async (label = "FACE_MISMATCH") => {
+    if (!examId || !studentId) return null;
+    if (clipUploadedPathRef.current) return clipUploadedPathRef.current;
+
+    if (!recentChunksRef.current.length) return null;
+
+    const blob = new Blob(recentChunksRef.current, { type: "video/webm" });
+    if (blob.size === 0) return null;
+
+    const formData = new FormData();
+    formData.append(
+      "recording",
+      blob,
+      `exam_${examId}_${studentId}_${label}_${Date.now()}.webm`
+    );
+
+    const uploadRes = await fetch(`${NODE_URL}/uploadstudent/upload-proctoring`, {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!uploadRes.ok) {
+      throw new Error("Failed to upload face mismatch clip");
+    }
+
+    const uploadData = await uploadRes.json();
+    const recordingPath = uploadData.recordingPath || null;
+    clipUploadedPathRef.current = recordingPath;
+    return recordingPath;
+  };
+
+  const getRecordingElapsedSeconds = () => {
+    if (!recordingStartedAtRef.current) return 0;
+    return Math.max(0, (Date.now() - recordingStartedAtRef.current) / 1000);
+  };
+
+  return { uploadRecording, uploadRecentClip, getRecordingElapsedSeconds };
 };
 
 export default useProctoringRecorder;

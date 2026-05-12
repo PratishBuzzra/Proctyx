@@ -23,13 +23,14 @@ function Exam() {
   const [submitting, setSubmitting] = useState(false);
   const [remainingSeconds, setRemainingSeconds] = useState(0);
   const [timeUp, setTimeUp] = useState(false);
+  const [criticalViolationMessage, setCriticalViolationMessage] = useState("");
   const autoSubmittedRef = useRef(false);
   const submitExamRef = useRef(null);
 
   /* guards */
   useExamGuard(examId, studentId);
   const { isFullscreen, requestFullscreen } = useFullscreenGuard();
-  const { uploadRecording } = useProctoringRecorder(examActive, examId, studentId, selectedDeviceId);
+  const { uploadRecording, getRecordingElapsedSeconds } = useProctoringRecorder(examActive, examId, studentId, selectedDeviceId);
   useAudioMonitor(examActive, examId, studentId);
 
   const examDeadline = useMemo(() => {
@@ -110,7 +111,7 @@ function Exam() {
     setCurrent((prev) => prev + 1);
   };
 
-  const handleSubmit = async (force = false) => {
+  const handleSubmit = async (force = false, source = "manual", reason = "") => {
     if (!force && !answers[questions[current].id]) {
       toast("Please select an answer");
       return;
@@ -119,8 +120,11 @@ function Exam() {
     if (submitting) return;
 
     autoSubmittedRef.current = true;
-    if (force) {
+    if (source === "timer") {
       setTimeUp(true);
+    }
+    if (source === "critical") {
+      setCriticalViolationMessage(reason || "Face mismatch detected. Submitting exam...");
     }
     setSubmitting(true);
     setExamActive(false);
@@ -169,6 +173,97 @@ function Exam() {
     }
   };
 
+  const handleCriticalViolation = async (violation) => {
+    if (autoSubmittedRef.current) return;
+
+    autoSubmittedRef.current = true;
+    setCriticalViolationMessage(
+      violation?.description || "Face mismatch detected. Submitting exam..."
+    );
+    setSubmitting(true);
+    setExamActive(false);
+
+    try {
+      const fullRecordingPath = await uploadRecording();
+      let clipPath = fullRecordingPath || null;
+
+      if (fullRecordingPath) {
+        try {
+          const clipRes = await fetch(`${base_url}/uploadstudent/extract-face-mismatch-clip`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({
+              recordingPath: fullRecordingPath,
+              eventTimeSeconds: getRecordingElapsedSeconds(),
+              clipBeforeSeconds: 3,
+              clipAfterSeconds: 3,
+            }),
+          });
+
+          const clipData = await clipRes.json();
+          if (clipRes.ok && clipData?.clipPath) {
+            clipPath = clipData.clipPath;
+          }
+        } catch (clipErr) {
+          console.error("Face mismatch clip extraction failed:", clipErr);
+        }
+      }
+
+      await fetch(`${base_url}/violations/store`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          examId: parseInt(examId),
+          studentId,
+          type: "FACE_MISMATCH_DETECTED",
+          severity: "high",
+          description:
+            violation?.description || "Face mismatch detected during exam",
+          videoPath: clipPath || null,
+        }),
+      });
+    } catch (err) {
+      console.error("Failed to store face mismatch violation:", err);
+    }
+
+    const formattedAnswers = Object.entries(answers).map(
+      ([questionId, selectedAnswer]) => ({
+        questionId: parseInt(questionId),
+        selectedAnswer,
+      })
+    );
+
+    try {
+      const res = await fetch(`${base_url}/checkresult/results/submit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          examId: parseInt(examId),
+          studentId,
+          answers: formattedAnswers,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (res.ok) {
+        navigate(`/result/${examId}/${studentId}`, {
+          state: { result: data.result },
+        });
+      } else {
+        alert(data.message || "Failed to submit exam");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Server error while submitting exam");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   useEffect(() => {
     submitExamRef.current = handleSubmit;
   }, [handleSubmit]);
@@ -185,7 +280,12 @@ function Exam() {
 
   return (
     <>
-      <WebcamMonitor examId={examId} studentId={studentId} active={examActive} />
+      <WebcamMonitor
+        examId={examId}
+        studentId={studentId}
+        active={examActive}
+        onCriticalViolation={handleCriticalViolation}
+      />
 
       {!isFullscreen && (
         <div className="fixed inset-0 bg-black/80 z-50 flex flex-col items-center justify-center text-white">
@@ -209,6 +309,12 @@ function Exam() {
           {timeUp && submitting && (
             <div className="mb-4 rounded bg-yellow-50 px-4 py-3 text-center text-yellow-800 font-medium">
               Time&apos;s up, submitting...
+            </div>
+          )}
+
+          {criticalViolationMessage && submitting && (
+            <div className="mb-4 rounded bg-red-50 px-4 py-3 text-center text-red-800 font-medium">
+              {criticalViolationMessage}
             </div>
           )}
 

@@ -41,9 +41,9 @@ VERY_DARK_BRIGHTNESS = 50.0
 ENABLE_ANTISPOOF = os.getenv("ENABLE_ANTISPOOF", "1").strip().lower() not in {
     "0", "false", "off", "no"
 }
-ANTISPOOF_MIN_REAL_CONF = 0.35
+ANTISPOOF_MIN_REAL_CONF = 0.40
 ANTISPOOF_PASS_RATIO = 0.50
-ANTISPOOF_HARD_REJECT = 0.15
+ANTISPOOF_HARD_REJECT = 0.20
 ANTISPOOF_RETRY_THRESHOLD = 0.25
 
 # InsightFace singleton runtime
@@ -568,3 +568,79 @@ async def verify_face_v2(
         for p in live_paths:
             if os.path.exists(p):
                 os.remove(p)
+
+
+@app.post("/monitor-face-match")
+async def monitor_face_match(
+    registered_image: UploadFile = File(...),
+    live_image: UploadFile = File(...)
+):
+    reg_path = f"{TEMP_DIR}/{uuid.uuid4()}_reg.jpg"
+    live_path = f"{TEMP_DIR}/{uuid.uuid4()}_live.jpg"
+
+    with open(reg_path, "wb") as f:
+        shutil.copyfileobj(registered_image.file, f)
+
+    with open(live_path, "wb") as f:
+        shutil.copyfileobj(live_image.file, f)
+
+    try:
+        reg_img = face_recognition.load_image_file(reg_path)
+        live_img = face_recognition.load_image_file(live_path)
+
+        reg_embedding, reg_crop, reg_error = get_insightface_face_and_embedding(reg_img)
+        if reg_error:
+            return {
+                "matched": None,
+                "critical": False,
+                "ignored": True,
+                "reason": f"Monitor: {reg_error}",
+            }
+
+        live_embedding, live_crop, live_error = get_insightface_face_and_embedding(live_img)
+        if live_error:
+            if live_error in {"No face detected", "Multiple persons detected", "Face crop failed"}:
+                return {
+                    "matched": None,
+                    "critical": False,
+                    "ignored": True,
+                    "reason": live_error,
+                }
+            return {
+                "matched": False,
+                "critical": False,
+                "ignored": True,
+                "reason": f"Monitor: {live_error}",
+            }
+
+        reg_crop_for_checks, _, _ = enhance_low_light_if_needed(reg_crop)
+        live_crop_for_checks, _, _ = enhance_low_light_if_needed(live_crop)
+
+        reg_quality_ok, reg_quality_reason = is_image_quality_good(reg_crop_for_checks)
+        live_quality_ok, live_quality_reason = is_image_quality_good(live_crop_for_checks)
+        if not reg_quality_ok:
+            print(f"[MonitorQuality][Reg] Warning: {reg_quality_reason}")
+        if not live_quality_ok:
+            print(f"[MonitorQuality][Live] Warning: {live_quality_reason}")
+
+        similarity = float(np.dot(live_embedding, reg_embedding))
+        best_distance = float(1.0 - similarity)
+        matched = similarity >= V2_SIMILARITY_THRESHOLD
+        match_level = get_match_level_v2(similarity)
+        face_conf = max(0.0, min(1.0, (similarity + 1.0) / 2.0))
+
+        return {
+            "matched": bool(matched),
+            "critical": not bool(matched),
+            "ignored": False,
+            "distance": float(round(best_distance, 3)),
+            "similarity": float(round(similarity, 3)),
+            "match_level": str(match_level),
+            "confidence": float(round(face_conf, 3)),
+            "reason": None if bool(matched) else "Face mismatch detected during exam",
+        }
+    finally:
+        if os.path.exists(reg_path):
+            os.remove(reg_path)
+        if os.path.exists(live_path):
+            os.remove(live_path)

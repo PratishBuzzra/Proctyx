@@ -57,13 +57,35 @@ const ExamReport = () => {
   };
 
   const getVideoUrl = (violation) => {
-    const filename = getVideoFilename(violation.videoPath);
+    if (!violation?.videoPath) return null;
+
+    const normalized = violation.videoPath.replace(/\\/g, "/").trim();
+    const nodeBase = base_url?.replace(/\/api\/v1\/?$/, "") || "http://localhost:3000";
+
+    // Proctored full recordings and face-mismatch clips are stored under uploads/
+    // on the Node server, so they should be loaded from the Node static path.
+    if (normalized.startsWith("uploads/")) {
+      const supportedExt = [".webm", ".mp4", ".mkv", ".mov"];
+      if (!supportedExt.some((ext) => normalized.toLowerCase().endsWith(ext))) return null;
+      return `${nodeBase}/${normalized}`;
+    }
+
+    const filename = getVideoFilename(normalized);
     if (!filename) return null;
     const type = violation.type || "";
     let port = 8003; // gaze default
     if (type.startsWith("HEAD_")) port = 8004;
     if (type.startsWith("OBJECT_")) port = 8005;
     return `http://localhost:${port}/videos/${filename}`;
+  };
+
+  const getVideoMimeType = (videoUrl) => {
+    if (!videoUrl || typeof videoUrl !== "string") return "video/mp4";
+    const normalized = videoUrl.toLowerCase().split("?")[0].split("#")[0];
+    if (normalized.endsWith(".webm")) return "video/webm";
+    if (normalized.endsWith(".mov")) return "video/quicktime";
+    if (normalized.endsWith(".mkv")) return "video/x-matroska";
+    return "video/mp4";
   };
 
   const getAudioFilename = (audioPath) => {
@@ -247,16 +269,25 @@ const ExamReport = () => {
                           <p className="text-xs text-gray-500 mb-1">
                             📹 Violation Video:
                           </p>
-                          {/* FIX 1: Use getVideoUrl() helper instead of fragile inline path logic.
-                              Old code: http://localhost:{port}/videos/{v.videoPath.replace(/\\/g,"/")}
-                              where port was guessed by checking if "head" appears in the path string.
-                              New code: port is derived cleanly from violation.type, and the path
-                              is just the filename since the static mount points at the violations dir. */}
                           <video
-                            src={getVideoUrl(v)}
                             controls
-                            className="w-full max-w-sm rounded border"
-                          />
+                            preload="metadata"
+                            className="w-full max-w-sm rounded border bg-black"
+                          >
+                            <source
+                              src={getVideoUrl(v)}
+                              type={getVideoMimeType(getVideoUrl(v))}
+                            />
+                            Your browser does not support the video tag.
+                          </video>
+                          <a
+                            href={getVideoUrl(v)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-2 inline-block text-xs text-blue-600 hover:underline"
+                          >
+                            Open evidence in new tab
+                          </a>
                         </div>
                       )}
 

@@ -18,11 +18,12 @@ const normalizeVideoPath = (videoPath) => {
 
 const buildSessionId = (examId, studentId) => `${examId}:${studentId}`;
 
-const WebcamMonitor = ({ examId, studentId, active = true }) => {
+const WebcamMonitor = ({ examId, studentId, active = true, onCriticalViolation }) => {
   const videoRef    = useRef(null);
   const streamRef   = useRef(null);
   const canvasRef   = useRef(null);
   const intervalRef = useRef(null);
+  const criticalTriggeredRef = useRef(false);
 
   const [showSelector, setShowSelector]       = useState(true);
   const [calibrated, setCalibrated]           = useState(false);
@@ -175,6 +176,40 @@ const WebcamMonitor = ({ examId, studentId, active = true }) => {
       }
     };
 
+    const analyzeFaceDuringExam = async (blob) => {
+      if (criticalTriggeredRef.current) return false;
+
+      try {
+        const formData = new FormData();
+        formData.append("studentId", studentId);
+        formData.append("examId", examId);
+        formData.append("live_photo", blob, "frame.jpg");
+
+        const res = await fetch(`${NODE_URL}/studentexam/monitor-face`, {
+          method: "POST",
+          credentials: "include",
+          body: formData,
+        });
+
+        const result = await res.json();
+
+        if (result?.critical) {
+          const description = result?.reason || "Face mismatch detected during exam";
+          criticalTriggeredRef.current = true;
+          onCriticalViolation?.({
+            type: "FACE_MISMATCH_DETECTED",
+            severity: "high",
+            description,
+          });
+          return true;
+        }
+      } catch (err) {
+        console.error("Face monitor error:", err);
+      }
+
+      return false;
+    };
+
     const analyzeObjectDetection = async (blob) => {
       try {
         const sessionId = buildSessionId(examId, studentId);
@@ -231,7 +266,12 @@ const WebcamMonitor = ({ examId, studentId, active = true }) => {
       // Phase 2: normal monitoring
       canvas.toBlob(async (blob) => {
         if (!blob) return;
-        await Promise.all([analyzeGaze(blob), analyzeHeadPose(blob), analyzeObjectDetection(blob)]);
+        await Promise.all([
+          analyzeFaceDuringExam(blob),
+          analyzeGaze(blob),
+          analyzeHeadPose(blob),
+          analyzeObjectDetection(blob),
+        ]);
       }, "image/jpeg", 0.8);
     };
 

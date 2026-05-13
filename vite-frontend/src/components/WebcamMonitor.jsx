@@ -18,7 +18,7 @@ const normalizeVideoPath = (videoPath) => {
 
 const buildSessionId = (examId, studentId) => `${examId}:${studentId}`;
 
-const WebcamMonitor = ({ examId, studentId, active = true, onCriticalViolation }) => {
+const WebcamMonitor = ({ examId, studentId, active = true, onCriticalViolation, onCalibrationChange }) => {
   const videoRef    = useRef(null);
   const streamRef   = useRef(null);
   const canvasRef   = useRef(null);
@@ -33,6 +33,10 @@ const WebcamMonitor = ({ examId, studentId, active = true, onCriticalViolation }
   const calibFrameCount = useRef(0);
 
   const { devices, selectedDeviceId, setSelectedDeviceId } = useCameraDevices();
+
+  useEffect(() => {
+    onCalibrationChange?.(calibrated);
+  }, [calibrated, onCalibrationChange]);
 
   // Restart stream when camera changes
   useEffect(() => {
@@ -64,6 +68,10 @@ const WebcamMonitor = ({ examId, studentId, active = true, onCriticalViolation }
   // Hide camera selector 5s after exam starts
   useEffect(() => {
     if (active) {
+      setCalibrated(false);
+      setCalibProgress(0);
+      calibFrameCount.current = 0;
+      setCalibMessage("Look straight at the camera to calibrate...");
       const timer = setTimeout(() => setShowSelector(false), 5000);
       return () => clearTimeout(timer);
     } else {

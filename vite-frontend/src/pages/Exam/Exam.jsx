@@ -24,6 +24,7 @@ function Exam() {
   const [remainingSeconds, setRemainingSeconds] = useState(0);
   const [timeUp, setTimeUp] = useState(false);
   const [criticalViolationMessage, setCriticalViolationMessage] = useState("");
+  const [isCalibrated, setIsCalibrated] = useState(false);
   const autoSubmittedRef = useRef(false);
   const submitExamRef = useRef(null);
 
@@ -285,6 +286,7 @@ function Exam() {
         studentId={studentId}
         active={examActive}
         onCriticalViolation={handleCriticalViolation}
+        onCalibrationChange={setIsCalibrated}
       />
 
       {!isFullscreen && (
@@ -300,7 +302,17 @@ function Exam() {
       )}
 
       <div className="min-h-screen flex items-center justify-center bg-gray-100">
-        <div className="bg-white p-8 rounded-lg shadow-xl w-full max-w-md">
+        <div className={`relative bg-white p-8 rounded-lg shadow-xl w-full max-w-md ${!isCalibrated ? "pointer-events-none select-none" : ""}`}>
+          {!isCalibrated && (
+            <div className="absolute inset-0 z-10 rounded-lg bg-white/90 flex flex-col items-center justify-center text-center p-6">
+              <div className="mb-3 h-10 w-10 animate-spin rounded-full border-4 border-blue-500 border-t-transparent" />
+              <h3 className="text-lg font-semibold text-gray-800">Calibrating camera...</h3>
+              <p className="mt-2 text-sm text-gray-600">
+                Please look straight at the camera and wait until calibration completes.
+                The exam will unlock automatically after calibration.
+              </p>
+            </div>
+          )}
           <div className="mb-4 rounded bg-red-50 px-4 py-3 text-center text-red-700">
             <span className="font-semibold">Time Left:</span>{" "}
             {String(minutes).padStart(2, "0")}:{String(seconds).padStart(2, "0")}
@@ -330,6 +342,7 @@ function Exam() {
                 type="radio"
                 checked={selectedAnswer === opt}
                 onChange={() => handleSelect(opt)}
+                disabled={!isCalibrated}
                 className="mr-2"
               />
               {opt}
@@ -341,6 +354,7 @@ function Exam() {
             {current > 0 && (
               <button
                 onClick={() => setCurrent((prev) => prev - 1)}
+                disabled={!isCalibrated}
                 className="bg-gray-400 text-white px-4 py-2 rounded"
               >
                 Previous
@@ -350,6 +364,7 @@ function Exam() {
             {!isLastQuestion ? (
               <button
                 onClick={handleNext}
+                disabled={!isCalibrated}
                 className="ml-auto bg-blue-600 text-white px-4 py-2 rounded"
               >
                 Next
@@ -357,7 +372,7 @@ function Exam() {
             ) : (
               <button
                 onClick={() => handleSubmit(false)}
-                disabled={submitting}
+                disabled={submitting || !isCalibrated}
                 className="ml-auto bg-green-600 text-white px-4 py-2 rounded disabled:opacity-50"
               >
                 {submitting ? "Submitting..." : "Submit Exam"}

@@ -24,11 +24,14 @@ const WebcamMonitor = ({ examId, studentId, active = true, onCriticalViolation, 
   const canvasRef   = useRef(null);
   const intervalRef = useRef(null);
   const criticalTriggeredRef = useRef(false);
+  const mismatchStreakRef = useRef(0);
+  const frameCountRef = useRef(0);
 
   const [showSelector, setShowSelector]       = useState(true);
   const [calibrated, setCalibrated]           = useState(false);
   const [calibProgress, setCalibProgress]     = useState(0);
   const [calibMessage, setCalibMessage]       = useState("Look straight at the camera to calibrate...");
+  const [faceWarning, setFaceWarning]         = useState(null);
 
   const calibFrameCount = useRef(0);
 
@@ -184,6 +187,8 @@ const WebcamMonitor = ({ examId, studentId, active = true, onCriticalViolation, 
       }
     };
 
+    const MISMATCH_CRITICAL_THRESHOLD = 2;
+
     const analyzeFaceDuringExam = async (blob) => {
       if (criticalTriggeredRef.current) return false;
 
@@ -202,14 +207,28 @@ const WebcamMonitor = ({ examId, studentId, active = true, onCriticalViolation, 
         const result = await res.json();
 
         if (result?.critical) {
-          const description = result?.reason || "Face mismatch detected during exam";
-          criticalTriggeredRef.current = true;
-          onCriticalViolation?.({
-            type: "FACE_MISMATCH_DETECTED",
-            severity: "high",
-            description,
-          });
-          return true;
+          mismatchStreakRef.current += 1;
+          console.warn(`Face mismatch streak: ${mismatchStreakRef.current}/${MISMATCH_CRITICAL_THRESHOLD}`);
+          setFaceWarning(`⚠️ Face not recognized (${mismatchStreakRef.current}/${MISMATCH_CRITICAL_THRESHOLD}) — please face the camera directly`);
+
+          if (mismatchStreakRef.current >= MISMATCH_CRITICAL_THRESHOLD) {
+            const description = result?.reason || "Face mismatch detected during exam";
+            criticalTriggeredRef.current = true;
+            setFaceWarning(null);
+            onCriticalViolation?.({
+              type: "FACE_MISMATCH_DETECTED",
+              severity: "high",
+              description,
+            });
+            return true;
+          }
+        } else {
+          // Reset streak on a good match
+          if (mismatchStreakRef.current > 0) {
+            console.log(`Face match restored — streak reset (was ${mismatchStreakRef.current})`);
+            mismatchStreakRef.current = 0;
+            setFaceWarning(null);
+          }
         }
       } catch (err) {
         console.error("Face monitor error:", err);
@@ -260,6 +279,8 @@ const WebcamMonitor = ({ examId, studentId, active = true, onCriticalViolation, 
       }
     };
 
+    const FACE_CHECK_EVERY_N_FRAMES = 5; // face check every 5s (interval is 1s)
+
     const captureAndAnalyze = async () => {
       const canvas = captureFrame();
       if (!canvas) return;
@@ -272,14 +293,24 @@ const WebcamMonitor = ({ examId, studentId, active = true, onCriticalViolation, 
       }
 
       // Phase 2: normal monitoring
+      frameCountRef.current += 1;
+      const shouldCheckFace = frameCountRef.current % FACE_CHECK_EVERY_N_FRAMES === 0;
+
       canvas.toBlob(async (blob) => {
         if (!blob) return;
-        await Promise.all([
-          analyzeFaceDuringExam(blob),
+
+        const tasks = [
           analyzeGaze(blob),
           analyzeHeadPose(blob),
           analyzeObjectDetection(blob),
-        ]);
+        ];
+
+        // Face recognition runs every 5 seconds, not every second
+        if (shouldCheckFace) {
+          tasks.push(analyzeFaceDuringExam(blob));
+        }
+
+        await Promise.all(tasks);
       }, "image/jpeg", 0.8);
     };
 
@@ -313,6 +344,24 @@ const WebcamMonitor = ({ examId, studentId, active = true, onCriticalViolation, 
       <p className="text-xs text-center bg-green-600 text-white rounded mb-1">
         {calibrated ? "Monitoring" : "Calibrating..."}
       </p>
+
+      {/* Face mismatch warning */}
+      {faceWarning && (
+        <div style={{
+          backgroundColor: "#fff3cd",
+          border: "1px solid #ffc107",
+          borderRadius: "4px",
+          padding: "4px 6px",
+          marginBottom: "4px",
+          fontSize: "10px",
+          color: "#856404",
+          fontWeight: "600",
+          textAlign: "center",
+          lineHeight: "1.3",
+        }}>
+          {faceWarning}
+        </div>
+      )}
 
       <video ref={videoRef} autoPlay muted playsInline className="w-full h-28 object-cover rounded" />
       <canvas ref={canvasRef} className="hidden" />

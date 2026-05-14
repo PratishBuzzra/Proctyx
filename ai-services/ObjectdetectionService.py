@@ -65,8 +65,13 @@ MIN_BOX_AREA_RATIO = {
 PERSISTENCE_WINDOW = 3
 PERSISTENCE_REQUIRED_HITS = 2
 
-# ---------- STATE ----------
-VIOLATION_COOLDOWN = 30.0
+# Per-type violation cooldown (seconds between DB log entries for the same type).
+# Also controls streak fill speed: streak 2/2 fires after 1 cooldown window (~10s).
+VIOLATION_COOLDOWNS = {
+    "OBJECT_PHONE": 10.0,
+    "OBJECT_MULTIPLE_PERSONS": 10.0,
+}
+DEFAULT_VIOLATION_COOLDOWN = 10.0
 POST_VIOLATION_SECONDS = 5.0
 SESSION_TIMEOUT_SECONDS = 120.0
 executor = ThreadPoolExecutor(max_workers=2)
@@ -203,7 +208,8 @@ def should_fire_violation(state, vtype):
     now = time.time()
     last_violation_time = state["last_violation_time"]
     last = last_violation_time.get(vtype, 0)
-    if now - last >= VIOLATION_COOLDOWN:
+    cooldown = VIOLATION_COOLDOWNS.get(vtype, DEFAULT_VIOLATION_COOLDOWN)
+    if now - last >= cooldown:
         last_violation_time[vtype] = now
         return True
     return False

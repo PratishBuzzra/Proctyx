@@ -125,7 +125,7 @@ function Exam() {
       setTimeUp(true);
     }
     if (source === "critical") {
-      setCriticalViolationMessage(reason || "Face mismatch detected. Submitting exam...");
+      setCriticalViolationMessage(reason || "Critical violation detected. Submitting exam...");
     }
     setSubmitting(true);
     setExamActive(false);
@@ -218,10 +218,9 @@ function Exam() {
         body: JSON.stringify({
           examId: parseInt(examId),
           studentId,
-          type: "FACE_MISMATCH_DETECTED",
-          severity: "high",
-          description:
-            violation?.description || "Face mismatch detected during exam",
+          type:        violation?.type        || "FACE_MISMATCH_DETECTED",
+          severity:    violation?.severity    || "high",
+          description: violation?.description || "Critical violation detected during exam",
           videoPath: clipPath || null,
         }),
       });

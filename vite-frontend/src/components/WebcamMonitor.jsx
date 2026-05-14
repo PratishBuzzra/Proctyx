@@ -23,15 +23,18 @@ const WebcamMonitor = ({ examId, studentId, active = true, onCriticalViolation, 
   const streamRef   = useRef(null);
   const canvasRef   = useRef(null);
   const intervalRef = useRef(null);
-  const criticalTriggeredRef = useRef(false);
-  const mismatchStreakRef = useRef(0);
-  const frameCountRef = useRef(0);
+  const criticalTriggeredRef  = useRef(false);
+  const mismatchStreakRef      = useRef(0);
+  const frameCountRef          = useRef(0);
+  const phoneStreakRef         = useRef(0);
+  const multiPersonStreakRef   = useRef(0);
 
   const [showSelector, setShowSelector]       = useState(true);
   const [calibrated, setCalibrated]           = useState(false);
   const [calibProgress, setCalibProgress]     = useState(0);
   const [calibMessage, setCalibMessage]       = useState("Look straight at the camera to calibrate...");
   const [faceWarning, setFaceWarning]         = useState(null);
+  const [objectWarning, setObjectWarning]     = useState(null);
 
   const calibFrameCount = useRef(0);
 
@@ -237,7 +240,10 @@ const WebcamMonitor = ({ examId, studentId, active = true, onCriticalViolation, 
       return false;
     };
 
+    const OBJECT_CRITICAL_THRESHOLD = 2;
+
     const analyzeObjectDetection = async (blob) => {
+      if (criticalTriggeredRef.current) return;
       try {
         const sessionId = buildSessionId(examId, studentId);
         const formData = new FormData();
@@ -249,17 +255,62 @@ const WebcamMonitor = ({ examId, studentId, active = true, onCriticalViolation, 
         });
         const result = await res.json();
 
-        if (result?.violation && Array.isArray(result.violations)) {
-          await Promise.all(
-            result.violations.map((v) =>
-              storeViolation({
+        if (!result?.violation || !Array.isArray(result.violations)) return;
+
+        for (const v of result.violations) {
+          // --- Phone streak ---
+          if (v.type === "OBJECT_PHONE") {
+            phoneStreakRef.current += 1;
+            console.warn(`Phone streak: ${phoneStreakRef.current}/${OBJECT_CRITICAL_THRESHOLD}`);
+
+            if (phoneStreakRef.current < OBJECT_CRITICAL_THRESHOLD) {
+              // Streak 1: warning — log violation WITHOUT videoPath (video file not ready yet on disk)
+              await storeViolation({
                 type: v.type,
-                severity: v.severity || "medium",
-                description: v.description || "Object violation detected",
-                videoPath: normalizeVideoPath(v.videoPath),
-              })
-            )
-          );
+                severity: v.severity || "high",
+                description: `[WARNING] ${v.description || "Phone detected during exam"}`,
+                videoPath: null,
+              });
+              setObjectWarning(`⚠️ Phone detected (${phoneStreakRef.current}/${OBJECT_CRITICAL_THRESHOLD}) — remove it from view`);
+            } else {
+              // Streak 2: terminate — video handled by handleCriticalViolation via full recording clip
+              criticalTriggeredRef.current = true;
+              setObjectWarning(null);
+              onCriticalViolation?.({
+                type: "OBJECT_PHONE",
+                severity: "high",
+                description: v.description || "Phone detected during exam",
+              });
+              return;
+            }
+          }
+
+          // --- Multiple persons streak ---
+          if (v.type === "OBJECT_MULTIPLE_PERSONS") {
+            multiPersonStreakRef.current += 1;
+            console.warn(`Multi-person streak: ${multiPersonStreakRef.current}/${OBJECT_CRITICAL_THRESHOLD}`);
+
+            if (multiPersonStreakRef.current < OBJECT_CRITICAL_THRESHOLD) {
+              // Streak 1: warning — log violation WITHOUT videoPath (video file not ready yet on disk)
+              await storeViolation({
+                type: v.type,
+                severity: v.severity || "high",
+                description: `[WARNING] ${v.description || "Multiple persons detected"}`,
+                videoPath: null,
+              });
+              setObjectWarning(`⚠️ Multiple persons detected (${multiPersonStreakRef.current}/${OBJECT_CRITICAL_THRESHOLD}) — only you should be visible`);
+            } else {
+              // Streak 2: terminate — video handled by handleCriticalViolation via full recording clip
+              criticalTriggeredRef.current = true;
+              setObjectWarning(null);
+              onCriticalViolation?.({
+                type: "OBJECT_MULTIPLE_PERSONS",
+                severity: "high",
+                description: v.description || "Multiple persons detected during exam",
+              });
+              return;
+            }
+          }
         }
       } catch (err) {
         console.error("Object detection error:", err);
@@ -360,6 +411,24 @@ const WebcamMonitor = ({ examId, studentId, active = true, onCriticalViolation, 
           lineHeight: "1.3",
         }}>
           {faceWarning}
+        </div>
+      )}
+
+      {/* Object detection warning (phone / multiple persons) */}
+      {objectWarning && (
+        <div style={{
+          backgroundColor: "#f8d7da",
+          border: "1px solid #f5c2c7",
+          borderRadius: "4px",
+          padding: "4px 6px",
+          marginBottom: "4px",
+          fontSize: "10px",
+          color: "#842029",
+          fontWeight: "600",
+          textAlign: "center",
+          lineHeight: "1.3",
+        }}>
+          {objectWarning}
         </div>
       )}
 
